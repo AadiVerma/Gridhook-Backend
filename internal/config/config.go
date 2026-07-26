@@ -1,27 +1,28 @@
-// Package config loads process configuration from the environment. Kept
-// deliberately tiny — no viper/koanf — since the surface area here is small
-// and explicit beats magic for a handful of env vars.
 package config
 
 import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
 	DatabaseURL      string
-	RedisAddr        string
 	HTTPAddr         string
 	SessionTTL       time.Duration
-	KMSKeyID         string // passed to internal/db.Sealer implementations
-	MCPPublicBaseURL string // e.g. https://gw.gridhook.dev/mcp
+	KMSKeyID         string
+	MCPPublicBaseURL string
 }
 
 func Load() (Config, error) {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		return Config{}, fmt.Errorf("config: load .env: %w", err)
+	}
+
 	cfg := Config{
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://localhost:5432/gridhook?sslmode=disable"),
-		RedisAddr:        getEnv("REDIS_ADDR", "localhost:6379"),
 		HTTPAddr:         getEnv("HTTP_ADDR", ":8080"),
 		SessionTTL:       30 * 24 * time.Hour,
 		KMSKeyID:         os.Getenv("KMS_KEY_ID"),

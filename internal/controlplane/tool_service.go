@@ -2,26 +2,23 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/dispatcher"
 	"gridhook.dev/connector-backend/internal/models"
 	"gridhook.dev/connector-backend/internal/parsers"
 )
 
-// ToolService owns mcp_tools CRUD and implements dispatcher.ToolStore, so
-// the live dispatch path and the admin CRUD path share one source of truth
-// for what a tool is and which connector_api it belongs to.
 type ToolService struct {
-	pool *pgxpool.Pool
+	db *gorm.DB
 }
 
-func NewToolService(pool *pgxpool.Pool) *ToolService {
-	return &ToolService{pool: pool}
+func NewToolService(gdb *gorm.DB) *ToolService {
+	return &ToolService{db: gdb}
 }
 
 type CreateToolInput struct {
@@ -56,31 +53,18 @@ func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineTy
 		Version:           "1",
 		DisplayOnFrontend: true,
 	}
-	var groupID any
-	if in.GroupID != 0 {
-		groupID = in.GroupID
-	}
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO mcp_tools
-			(connector_api_id, group_id, engine_type, name, method, path, description,
-			 parameters, endpoint_mapping, response_mapping, output_schema, cached, cache_ttl_seconds)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		RETURNING id, status, version, display_on_frontend, created_at, updated_at
-	`, connectorAPIID, groupID, engineType, in.Name, in.Method, in.Path, in.Description,
-		t.Parameters, t.EndpointMapping, t.ResponseMapping, t.OutputSchema, in.Cached, in.CacheTTLSeconds,
-	).Scan(&t.ID, &t.Status, &t.Version, &t.DisplayOnFrontend, &t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
+	if err := s.db.WithContext(ctx).Omit("GroupID").Create(t).Error; err != nil {
 		return nil, fmt.Errorf("controlplane: create tool: %w", err)
 	}
 	if in.GroupID != 0 {
+		if err := s.db.WithContext(ctx).Exec(`UPDATE mcp_tools SET group_id = ? WHERE id = ?`, in.GroupID, t.ID).Error; err != nil {
+			return nil, fmt.Errorf("controlplane: create tool: set group: %w", err)
+		}
 		t.GroupID = in.GroupID
 	}
 	return t, nil
 }
 
-// BulkCreate persists every DraftTool a parser produced against one
-// connector_api — the "creates connector + tools in one shot" step behind
-// POST /connectors/import.
 func (s *ToolService) BulkCreate(ctx context.Context, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool) ([]*models.MCPTool, error) {
 	out := make([]*models.MCPTool, 0, len(drafts))
 	for _, d := range drafts {
@@ -102,32 +86,57 @@ func (s *ToolService) BulkCreate(ctx context.Context, connectorAPIID int64, engi
 	return out, nil
 }
 
-func (s *ToolService) ListByConnectorAPI(ctx context.Context, connectorAPIID int64) ([]*models.MCPTool, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, connector_api_id, coalesce(group_id,0), engine_type, name, method, path, description,
-		       parameters, endpoint_mapping, response_mapping, output_schema, cached, cache_ttl_seconds,
-		       status, version, coalesce(display_title,''), display_on_frontend, created_at, updated_at
-		FROM mcp_tools WHERE connector_api_id = $1 ORDER BY created_at
-	`, connectorAPIID)
+func (s *ToolService) withGroupID(ctx context.Context, tools []*models.MCPTool) error {
+	if len(tools) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(tools))
+	for i, t := range tools {
+		ids[i] = t.ID
+	}
+	var rows []struct {
+		ID      int64
+		GroupID int64
+	}
+	err := s.db.WithContext(ctx).Raw(
+		`SELECT id, coalesce(group_id,0) AS group_id FROM mcp_tools WHERE id = ANY(?)`, ids,
+	).Scan(&rows).Error
 	if err != nil {
+		return err
+	}
+	byID := make(map[int64]int64, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r.GroupID
+	}
+	for _, t := range tools {
+		t.GroupID = byID[t.ID]
+	}
+	return nil
+}
+
+func (s *ToolService) ListByConnectorAPI(ctx context.Context, connectorAPIID int64) ([]*models.MCPTool, error) {
+	var tools []*models.MCPTool
+	if err := s.db.WithContext(ctx).Where("connector_api_id = ?", connectorAPIID).Order("created_at").Find(&tools).Error; err != nil {
 		return nil, fmt.Errorf("controlplane: list tools: %w", err)
 	}
-	defer rows.Close()
-	return scanTools(rows)
+	if err := s.withGroupID(ctx, tools); err != nil {
+		return nil, fmt.Errorf("controlplane: list tools: group ids: %w", err)
+	}
+	return tools, nil
 }
 
 func (s *ToolService) Get(ctx context.Context, id int64) (*models.MCPTool, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, connector_api_id, coalesce(group_id,0), engine_type, name, method, path, description,
-		       parameters, endpoint_mapping, response_mapping, output_schema, cached, cache_ttl_seconds,
-		       status, version, coalesce(display_title,''), display_on_frontend, created_at, updated_at
-		FROM mcp_tools WHERE id = $1
-	`, id)
-	t, err := scanTool(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+	t := &models.MCPTool{}
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(t).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
-	return t, err
+	if err := s.withGroupID(ctx, []*models.MCPTool{t}); err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 type UpdateToolInput struct {
@@ -139,125 +148,116 @@ type UpdateToolInput struct {
 }
 
 func (s *ToolService) Update(ctx context.Context, id int64, in UpdateToolInput) (*models.MCPTool, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE mcp_tools SET
-			name = coalesce($2, name),
-			method = coalesce($3, method),
-			path = coalesce($4, path),
-			cache_ttl_seconds = coalesce($5, cache_ttl_seconds),
-			group_id = coalesce($6, group_id),
-			updated_at = now()
-		WHERE id = $1
-	`, id, in.Name, in.Method, in.Path, in.CacheTTLSeconds, in.GroupID)
+	updates := map[string]any{}
+	if in.Name != nil {
+		updates["name"] = *in.Name
+	}
+	if in.Method != nil {
+		updates["method"] = *in.Method
+	}
+	if in.Path != nil {
+		updates["path"] = *in.Path
+	}
+	if in.CacheTTLSeconds != nil {
+		updates["cache_ttl_seconds"] = *in.CacheTTLSeconds
+	}
+	if len(updates) > 0 {
+		updates["updated_at"] = gorm.Expr("now()")
+	}
+
+	var affected int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			res := tx.Model(&models.MCPTool{}).Where("id = ?", id).Updates(updates)
+			if res.Error != nil {
+				return res.Error
+			}
+			affected = res.RowsAffected
+		}
+		if in.GroupID != nil {
+			res := tx.Exec(`UPDATE mcp_tools SET group_id = ?, updated_at = now() WHERE id = ?`, *in.GroupID, id)
+			if res.Error != nil {
+				return res.Error
+			}
+			affected = res.RowsAffected
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: update tool: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if affected == 0 {
 		return nil, ErrNotFound
 	}
 	return s.Get(ctx, id)
 }
 
 func (s *ToolService) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM mcp_tools WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("controlplane: delete tool: %w", err)
+	tx := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.MCPTool{})
+	if tx.Error != nil {
+		return fmt.Errorf("controlplane: delete tool: %w", tx.Error)
 	}
-	if tag.RowsAffected() == 0 {
+	if tx.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil
 }
 
-// ResolveForServer implements dispatcher.ToolStore: find a tool by name,
-// scoped to exactly the tool groups assigned to mcpServerID. A tool outside
-// every assigned group is invisible here by design — this is the
-// group-wise invocation boundary from ARCHITECTURE.md §3.
 func (s *ToolService) ResolveForServer(ctx context.Context, mcpServerID int64, toolName string) (*dispatcher.ToolLookup, error) {
-	var lookup dispatcher.ToolLookup
 	t := &models.MCPTool{}
 	a := &models.ConnectorAPI{}
-	err := s.pool.QueryRow(ctx, `
-		SELECT t.id, t.connector_api_id, coalesce(t.group_id,0), t.engine_type, t.name, t.method, t.path,
+	row := s.db.WithContext(ctx).Raw(`
+		SELECT t.id, t.connector_api_id, coalesce(t.group_id,0) AS group_id, t.engine_type, t.name, t.method, t.path,
 		       t.description, t.parameters, t.endpoint_mapping, t.response_mapping, t.output_schema,
-		       t.cached, t.cache_ttl_seconds, t.status, t.version, coalesce(t.display_title,''), t.display_on_frontend,
+		       t.cached, t.cache_ttl_seconds, t.status, t.version, coalesce(t.display_title,'') AS display_title, t.display_on_frontend,
 		       t.created_at, t.updated_at,
-		       a.id, a.connector_id, a.name, a.engine_type, a.base_url, a.auth_type, coalesce(a.spec_url,''),
-		       a.is_active, a.created_at, a.updated_at
+		       a.id AS api_id, a.connector_id AS api_connector_id, a.name AS api_name, a.engine_type AS api_engine_type,
+		       a.base_url AS api_base_url, a.auth_type AS api_auth_type, coalesce(a.spec_url,'') AS api_spec_url,
+		       a.is_active AS api_is_active, a.created_at AS api_created_at, a.updated_at AS api_updated_at
 		FROM mcp_tools t
 		JOIN connector_apis a ON a.id = t.connector_api_id
-		JOIN mcp_server_tool_groups g ON g.tool_group_id = t.group_id AND g.mcp_server_id = $1
-		WHERE t.name = $2 AND t.status = 'active'
-	`, mcpServerID, toolName).Scan(
-		&t.ID, &t.ConnectorAPIID, &t.GroupID, &t.EngineType, &t.Name, &t.Method, &t.Path,
+		JOIN mcp_server_tool_groups g ON g.tool_group_id = t.group_id AND g.mcp_server_id = ?
+		WHERE t.name = ? AND t.status = 'active'
+	`, mcpServerID, toolName).Row()
+
+	var groupID int64
+	err := row.Scan(
+		&t.ID, &t.ConnectorAPIID, &groupID, &t.EngineType, &t.Name, &t.Method, &t.Path,
 		&t.Description, &t.Parameters, &t.EndpointMapping, &t.ResponseMapping, &t.OutputSchema,
 		&t.Cached, &t.CacheTTLSeconds, &t.Status, &t.Version, &t.DisplayTitle, &t.DisplayOnFrontend,
 		&t.CreatedAt, &t.UpdatedAt,
 		&a.ID, &a.ConnectorID, &a.Name, &a.EngineType, &a.BaseURL, &a.AuthType, &a.SpecURL,
 		&a.IsActive, &a.CreatedAt, &a.UpdatedAt,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("controlplane: tool %q not found or not assigned to this server", toolName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: resolve tool: %w", err)
 	}
-	lookup.Tool = t
-	lookup.API = a
-	lookup.ConnectorID = a.ConnectorID
-	return &lookup, nil
+	t.GroupID = groupID
+	return &dispatcher.ToolLookup{Tool: t, API: a, ConnectorID: a.ConnectorID}, nil
 }
 
-// ListForServer returns every tool reachable from an MCP server — the
-// aggregated set GET /mcp/:slug/tools serves to clients (and what
-// GET /mcp-servers/:id/tools shows in the admin UI).
 func (s *ToolService) ListForServer(ctx context.Context, mcpServerID int64) ([]*models.MCPTool, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT t.id, t.connector_api_id, coalesce(t.group_id,0), t.engine_type, t.name, t.method, t.path,
-		       t.description, t.parameters, t.endpoint_mapping, t.response_mapping, t.output_schema,
-		       t.cached, t.cache_ttl_seconds, t.status, t.version, coalesce(t.display_title,''), t.display_on_frontend,
-		       t.created_at, t.updated_at
-		FROM mcp_tools t
-		JOIN mcp_server_tool_groups g ON g.tool_group_id = t.group_id AND g.mcp_server_id = $1
-		WHERE t.status = 'active'
-		ORDER BY t.name
-	`, mcpServerID)
+	var tools []*models.MCPTool
+	err := s.db.WithContext(ctx).
+		Joins("JOIN mcp_server_tool_groups g ON g.tool_group_id = mcp_tools.group_id AND g.mcp_server_id = ?", mcpServerID).
+		Where("mcp_tools.status = ?", models.ToolActive).
+		Order("mcp_tools.name").
+		Find(&tools).Error
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: list tools for server: %w", err)
 	}
-	defer rows.Close()
-	return scanTools(rows)
-}
-
-func scanTools(rows pgx.Rows) ([]*models.MCPTool, error) {
-	var out []*models.MCPTool
-	for rows.Next() {
-		t, err := scanTool(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
+	if err := s.withGroupID(ctx, tools); err != nil {
+		return nil, fmt.Errorf("controlplane: list tools for server: group ids: %w", err)
 	}
-	return out, rows.Err()
+	return tools, nil
 }
 
-// row abstracts over pgx.Row and pgx.Rows, both of which implement Scan.
-type row interface {
-	Scan(dest ...any) error
-}
-
-func scanTool(r row) (*models.MCPTool, error) {
-	t := &models.MCPTool{}
-	err := r.Scan(&t.ID, &t.ConnectorAPIID, &t.GroupID, &t.EngineType, &t.Name, &t.Method, &t.Path,
-		&t.Description, &t.Parameters, &t.EndpointMapping, &t.ResponseMapping, &t.OutputSchema,
-		&t.Cached, &t.CacheTTLSeconds, &t.Status, &t.Version, &t.DisplayTitle, &t.DisplayOnFrontend,
-		&t.CreatedAt, &t.UpdatedAt)
-	return t, err
-}
-
-func orEmpty(m map[string]any) map[string]any {
+func orEmpty(m map[string]any) models.JSONMap {
 	if m == nil {
-		return map[string]any{}
+		return models.JSONMap{}
 	}
 	return m
 }

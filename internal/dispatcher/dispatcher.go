@@ -1,14 +1,3 @@
-// Package dispatcher implements the single deterministic pipeline described
-// in ARCHITECTURE.md §3:
-//
-//	resolve(tool_key, server) -> connector_api -> AuthBroker.Resolve
-//	  -> Engine.Execute -> normalize -> response_mapping -> audit -> return
-//
-// This is not an agentic loop — there is no runtime reasoning here. The
-// LLM client already decided which tool to call; this package's only job is
-// executing that one well-defined call reliably. It never touches
-// Session/User tables directly — the route layer verifies identity first
-// and passes it in as plain values (see internal/api/mcp_routes.go).
 package dispatcher
 
 import (
@@ -23,48 +12,30 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// ToolLookup is what resolving a tool name against an MCP server yields.
 type ToolLookup struct {
 	Tool        *models.MCPTool
 	API         *models.ConnectorAPI
 	ConnectorID int64
 }
 
-// ToolStore resolves a tool by name, scoped to exactly the tools reachable
-// from mcpServerID — i.e. belonging to one of the tool groups assigned to
-// that server. A tool that exists but isn't in an assigned group is
-// invisible to this server, by design (this is the "group-wise invocation"
-// boundary).
 type ToolStore interface {
 	ResolveForServer(ctx context.Context, mcpServerID int64, toolName string) (*ToolLookup, error)
 }
 
-// CredentialResolver is the subset of auth.Broker the dispatcher needs —
-// declared here (not imported concretely) so dispatcher tests can fake it
-// without spinning up a real broker. auth.Broker satisfies this directly.
 type CredentialResolver interface {
 	Resolve(ctx context.Context, api *models.ConnectorAPI) (schemes.Credentials, error)
 }
 
-// AuditWriter persists a ToolInvocation. Implementations should not block
-// the response on write latency (see internal/audit.Logger).
 type AuditWriter interface {
 	Write(ctx context.Context, inv *models.ToolInvocation)
 }
 
-// Identity is the already-verified caller, resolved by the route layer
-// before the dispatcher is ever invoked.
 type Identity struct {
 	OrganizationID int64
 	UserID         int64
 	UserEmail      string
 }
 
-// Outcome is what the MCP-facing route layer serializes back to the client.
-// Upstream 4xx/5xx responses are NOT Go errors here — they're a normal,
-// shaped Outcome with Status == error. Go errors are reserved for
-// platform-level failures (unknown tool, no engine registered, auth broker
-// failure) that never reached the upstream at all.
 type Outcome struct {
 	Status     models.InvocationStatus
 	HTTPCode   int
@@ -84,8 +55,6 @@ func New(tools ToolStore, broker CredentialResolver, registry *engines.Registry,
 	return &Dispatcher{tools: tools, broker: broker, registry: registry, audit: audit}
 }
 
-// Invoke is the MCP runtime's live path: resolve by name scoped to the
-// tools an MCP server actually exposes, then dispatch.
 func (d *Dispatcher) Invoke(ctx context.Context, mcpServerID int64, toolName string, input map[string]any, ident Identity) (*Outcome, error) {
 	lookup, err := d.tools.ResolveForServer(ctx, mcpServerID, toolName)
 	if err != nil {
@@ -94,10 +63,6 @@ func (d *Dispatcher) Invoke(ctx context.Context, mcpServerID int64, toolName str
 	return d.dispatch(ctx, lookup, mcpServerID, input, ident)
 }
 
-// InvokeDirect is Phase 5's "run" — testing a tool mapping before it's ever
-// assigned to an MCP server, so there is no group/server scoping to resolve
-// through. Callers (internal/api's tool-run handler) already loaded the
-// tool + its connector_api directly via ToolService/APIService.
 func (d *Dispatcher) InvokeDirect(ctx context.Context, tool *models.MCPTool, api *models.ConnectorAPI, input map[string]any, ident Identity) (*Outcome, error) {
 	lookup := &ToolLookup{Tool: tool, API: api, ConnectorID: api.ConnectorID}
 	return d.dispatch(ctx, lookup, 0, input, ident)

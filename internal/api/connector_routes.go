@@ -25,17 +25,10 @@ func registerConnectorRoutes(r chi.Router, d Deps) {
 	r.Post("/connectors/{id}/health-check", handleHealthCheckConnector(d))
 	r.Get("/connectors/{id}/export", handleExportConnector(d))
 
-	// Multi-API extension (ARCHITECTURE.md §1): a connector can bundle
-	// several protocol-specific APIs. Not in APIDOC.md's original contract,
-	// additive underneath it.
 	r.Get("/connectors/{id}/apis", handleListAPIs(d))
 	r.Post("/connectors/{id}/apis", handleCreateAPI(d))
 	r.Put("/connectors/{id}/apis/{apiId}/credentials", handlePutAPICredentials(d))
 
-	// Tools nest under a connector for APIDOC.md compatibility; internally
-	// they belong to one of its connector_apis. ?apiId= disambiguates when
-	// the connector has more than one; connectors with exactly one API
-	// resolve it automatically.
 	r.Get("/connectors/{id}/tools", handleListTools(d))
 	r.Post("/connectors/{id}/tools", handleCreateTool(d))
 	r.Get("/connectors/{id}/tools/{toolId}", handleGetTool(d))
@@ -62,15 +55,12 @@ func handleListConnectors(d Deps) http.HandlerFunc {
 func handleCreateConnector(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Name        string `json:"name"`
-			Glyph       string `json:"glyph"`
-			Description string `json:"description"`
-			// Optional inline primary API, matching APIDOC.md's flat
-			// Connector shape so a single-API connector can be created in
-			// one call exactly like before.
-			Type     models.EngineType `json:"type"`
-			BaseURL  string            `json:"baseUrl"`
-			AuthType models.AuthType   `json:"authType"`
+			Name        string            `json:"name"`
+			Glyph       string            `json:"glyph"`
+			Description string            `json:"description"`
+			Type        models.EngineType `json:"type"`
+			BaseURL     string            `json:"baseUrl"`
+			AuthType    models.AuthType   `json:"authType"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
@@ -182,9 +172,6 @@ func handleHealthCheckConnector(d Deps) http.HandlerFunc {
 	}
 }
 
-// handleImportConnector backs "Upload OpenAPI/Swagger spec -> creates
-// connector + tools in one shot." Format is picked via ?format=
-// (openapi|wsdl|postman|curl); defaults to openapi.
 func handleImportConnector(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		format := r.URL.Query().Get("format")
@@ -275,8 +262,6 @@ func handleExportConnector(d Deps) http.HandlerFunc {
 	}
 }
 
-// --- connector_apis -------------------------------------------------------
-
 func handleListAPIs(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := intIDParam(w, r, "id")
@@ -339,11 +324,6 @@ func handlePutAPICredentials(d Deps) http.HandlerFunc {
 	}
 }
 
-// --- tools -----------------------------------------------------------------
-
-// resolveAPIID picks the connector_api a tool request targets: the explicit
-// ?apiId= query param, or — for a connector with exactly one API — that
-// API, preserving APIDOC.md's original single-API-per-connector ergonomics.
 func resolveAPIID(w http.ResponseWriter, r *http.Request, d Deps, connectorID int64) (int64, bool) {
 	if explicit, ok := intQueryParam(w, r, "apiId"); !ok {
 		return 0, false
@@ -459,10 +439,6 @@ func handleDeleteTool(d Deps) http.HandlerFunc {
 	}
 }
 
-// handleRunTool is the "verify a tool mapping actually works" path from
-// Phase 5 — it dispatches directly against the tool's connector_api,
-// bypassing MCP-server/group scoping entirely (there may not be a server
-// yet).
 func handleRunTool(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		toolID, ok := intIDParam(w, r, "toolId")

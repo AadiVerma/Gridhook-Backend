@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/models"
 )
@@ -18,12 +17,12 @@ var (
 )
 
 type AuthService struct {
-	pool     *pgxpool.Pool
+	db       *gorm.DB
 	sessions *SessionService
 }
 
-func NewAuthService(pool *pgxpool.Pool, sessions *SessionService) *AuthService {
-	return &AuthService{pool: pool, sessions: sessions}
+func NewAuthService(gdb *gorm.DB, sessions *SessionService) *AuthService {
+	return &AuthService{db: gdb, sessions: sessions}
 }
 
 type RegisterInput struct {
@@ -38,13 +37,9 @@ type AuthResult struct {
 	Session *models.Session
 }
 
-// Register creates the account and its first organization (owner role). If
-// another org already exists for this email's domain, the new user
-// auto-joins it instead of creating a duplicate — the same behavior
-// trd.md's tenant-domain matching describes.
 func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResult, error) {
-	var existing int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE email = $1`, in.Email).Scan(&existing); err != nil {
+	var existing int64
+	if err := s.db.WithContext(ctx).Model(&models.User{}).Where("email = ?", in.Email).Count(&existing).Error; err != nil {
 		return nil, fmt.Errorf("identity: register: check email: %w", err)
 	}
 	if existing > 0 {
@@ -57,64 +52,54 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResu
 		return nil, fmt.Errorf("identity: register: hash password: %w", err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("identity: register: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var tenantID int64
-	err = tx.QueryRow(ctx, `SELECT id FROM tenants WHERE domain = $1`, domain).Scan(&tenantID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `INSERT INTO tenants (name, domain) VALUES ($1,$2) RETURNING id`, domain, domain).Scan(&tenantID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("identity: register: resolve tenant: %w", err)
-	}
-
-	var orgID int64
-	var isNewOrg bool
-	err = tx.QueryRow(ctx, `
-		SELECT o.id FROM organizations o WHERE o.tenant_id = $1 LIMIT 1
-	`, tenantID).Scan(&orgID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		isNewOrg = true
-		var companyID int64
-		orgName := in.Organization
-		if orgName == "" {
-			orgName = domain
+	u := &models.User{}
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var tenant models.Tenant
+		err := tx.Where("domain = ?", domain).First(&tenant).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			tenant = models.Tenant{Name: domain, Domain: domain}
+			if err := tx.Create(&tenant).Error; err != nil {
+				return fmt.Errorf("identity: register: create tenant: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("identity: register: resolve tenant: %w", err)
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO companies (name) VALUES ($1) RETURNING id`, orgName).Scan(&companyID); err != nil {
-			return nil, fmt.Errorf("identity: register: create company: %w", err)
-		}
-		slug := slugify(orgName)
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO organizations (company_id, tenant_id, name, slug) VALUES ($1,$2,$3,$4) RETURNING id
-		`, companyID, tenantID, orgName, slug).Scan(&orgID); err != nil {
-			return nil, fmt.Errorf("identity: register: create organization: %w", err)
-		}
-	} else if err != nil {
-		return nil, fmt.Errorf("identity: register: resolve organization: %w", err)
-	}
 
-	role := models.RoleDeveloper
-	status := models.UserStatusActive
-	if isNewOrg {
-		role = models.RoleOwner
-	}
+		var isNewOrg bool
+		var org models.Organization
+		err = tx.Where("tenant_id = ?", tenant.ID).First(&org).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			isNewOrg = true
+			orgName := in.Organization
+			if orgName == "" {
+				orgName = domain
+			}
+			company := models.Company{Name: orgName}
+			if err := tx.Create(&company).Error; err != nil {
+				return fmt.Errorf("identity: register: create company: %w", err)
+			}
+			org = models.Organization{CompanyID: company.ID, TenantID: tenant.ID, Name: orgName, Slug: slugify(orgName)}
+			if err := tx.Create(&org).Error; err != nil {
+				return fmt.Errorf("identity: register: create organization: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("identity: register: resolve organization: %w", err)
+		}
 
-	u := &models.User{OrganizationID: orgID, Email: in.Email, Name: in.Name, Role: role, Status: status}
-	err = tx.QueryRow(ctx, `
-		INSERT INTO users (organization_id, email, name, password_hash, role, status)
-		VALUES ($1,$2,$3,$4,$5,$6)
-		RETURNING id, created_at
-	`, orgID, in.Email, in.Name, passwordHash, role, status).Scan(&u.ID, &u.CreatedAt)
+		role := models.RoleDeveloper
+		status := models.UserStatusActive
+		if isNewOrg {
+			role = models.RoleOwner
+		}
+
+		*u = models.User{OrganizationID: org.ID, Email: in.Email, Name: in.Name, PasswordHash: passwordHash, Role: role, Status: status}
+		if err := tx.Create(u).Error; err != nil {
+			return fmt.Errorf("identity: register: create user: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("identity: register: create user: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("identity: register: commit: %w", err)
+		return nil, err
 	}
 
 	sess, err := s.sessions.Issue(ctx, u.ID)
@@ -126,11 +111,8 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResu
 
 func (s *AuthService) Login(ctx context.Context, email, password string) (*AuthResult, error) {
 	u := &models.User{}
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, organization_id, email, name, password_hash, role, status, created_at
-		FROM users WHERE email = $1
-	`, email).Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.Status, &u.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := s.db.WithContext(ctx).Where("email = ?", email).First(u).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
@@ -140,7 +122,8 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*AuthR
 		return nil, ErrInvalidCredentials
 	}
 
-	if _, err := s.pool.Exec(ctx, `UPDATE users SET last_active_at = now() WHERE id = $1`, u.ID); err != nil {
+	if err := s.db.WithContext(ctx).Model(&models.User{}).Where("id = ?", u.ID).
+		Update("last_active_at", gorm.Expr("now()")).Error; err != nil {
 		return nil, fmt.Errorf("identity: login: update last_active: %w", err)
 	}
 

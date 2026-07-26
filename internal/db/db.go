@@ -1,30 +1,39 @@
-// Package db owns the Postgres pool and the encryption boundary for
-// connector credentials. No ORM: queries are hand-written SQL via pgx,
-// matching the schema's "typed columns, no JSON blob" philosophy.
 package db
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type DB struct {
-	Pool *pgxpool.Pool
+	*gorm.DB
 }
 
 func Connect(ctx context.Context, dsn string) (*DB, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	gdb, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Warn),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("db: connect: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return nil, fmt.Errorf("db: underlying sql.DB: %w", err)
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("db: ping: %w", err)
 	}
-	return &DB{Pool: pool}, nil
+	return &DB{DB: gdb}, nil
 }
 
 func (d *DB) Close() {
-	d.Pool.Close()
+	sqlDB, err := d.DB.DB()
+	if err != nil {
+		return
+	}
+	sqlDB.Close()
 }

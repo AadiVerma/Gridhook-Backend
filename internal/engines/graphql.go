@@ -13,11 +13,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// GraphQLEngine posts a single query/mutation stored on the tool's
-// endpoint_mapping ({"query": "...", "operationName": "..."}), passing the
-// entire `input` map through as GraphQL variables — GraphQL's own variable
-// system already does what RestEngine's pathParams/queryParams/bodyParams
-// split does for REST, so no extra classification is needed here.
 type GraphQLEngine struct {
 	Client *http.Client
 }

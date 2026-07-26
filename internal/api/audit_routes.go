@@ -118,12 +118,6 @@ func parseTime(s string) *time.Time {
 	return &t
 }
 
-// handleInternalAuditIngest is the server-to-server endpoint from
-// APIDOC.md's Phase 8: the MCP runtime (a separate process/service) writes
-// invocations here for traffic it handles directly, outside this admin
-// API's own dispatcher.InvokeDirect path. Authenticated with a shared
-// internal token, not a user session — the MCP runtime has no user to
-// speak of for most calls.
 func handleInternalAuditIngest(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if d.InternalToken == "" || r.Header.Get("X-Internal-Token") != d.InternalToken {

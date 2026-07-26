@@ -15,9 +15,6 @@ func registerAuthRoutes(r chi.Router, d Deps) {
 	r.Post("/auth/logout", handleLogout(d))
 	r.Get("/auth/me", identity.RequireSession(d.Sessions)(http.HandlerFunc(handleMe)).ServeHTTP)
 
-	// Stubs: real delivery (email sending, token issuance) is deployment
-	// infra this scaffold doesn't stand up, but the contract shape is
-	// fixed here so the frontend can integrate against it immediately.
 	r.Post("/auth/forgot-password", notImplemented)
 	r.Post("/auth/reset-password", notImplemented)
 	r.Post("/auth/verify-email", notImplemented)

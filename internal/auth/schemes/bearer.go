@@ -7,7 +7,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// BearerScheme handles a static, pre-issued bearer token — no refresh flow.
 type BearerScheme struct{}
 
 func (BearerScheme) Resolve(_ context.Context, creds *models.ConnectorCredentials) (Credentials, error) {

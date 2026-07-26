@@ -10,23 +10,22 @@ const (
 	InvocationTimeout InvocationStatus = "timeout"
 )
 
-// ToolInvocation is the append-only audit row written at the end of every
-// dispatch, whether triggered by a test-run (Phase 5's POST .../run) or real
-// MCP client traffic. Denormalized so audit-log filters need no joins.
 type ToolInvocation struct {
-	ID             int64            `json:"id"`
-	ToolID         int64            `json:"tool"`
-	ConnectorID    int64            `json:"connector"`
-	ConnectorAPIID int64            `json:"connectorApiId"`
-	MCPServerID    int64            `json:"server,omitempty"`
-	OrganizationID int64            `json:"-"`
-	UserID         int64            `json:"-"`
-	UserEmail      string           `json:"-"`
-	Status         InvocationStatus `json:"status"`
-	HTTPCode       int              `json:"code"`
-	DurationMs     int              `json:"durationMs"`
-	Input          map[string]any   `json:"input"`
-	Output         map[string]any   `json:"output"`
-	Error          string           `json:"error,omitempty"`
-	CreatedAt      time.Time        `json:"time"`
+	ID             int64            `json:"id" gorm:"column:id"`
+	ToolID         int64            `json:"tool" gorm:"column:tool_id"`
+	ConnectorID    int64            `json:"connector" gorm:"column:connector_id"`
+	ConnectorAPIID int64            `json:"connectorApiId" gorm:"column:connector_api_id"`
+	MCPServerID    int64            `json:"server,omitempty" gorm:"column:mcp_server_id"`
+	OrganizationID int64            `json:"-" gorm:"column:organization_id"`
+	UserID         int64            `json:"-" gorm:"column:user_id"`
+	UserEmail      string           `json:"-" gorm:"column:user_email"`
+	Status         InvocationStatus `json:"status" gorm:"column:status"`
+	HTTPCode       int              `json:"code" gorm:"column:http_code"`
+	DurationMs     int              `json:"durationMs" gorm:"column:duration_ms"`
+	Input          JSONMap          `json:"input" gorm:"column:input"`
+	Output         JSONMap          `json:"output" gorm:"column:output"`
+	Error          string           `json:"error,omitempty" gorm:"column:error"`
+	CreatedAt      time.Time        `json:"time" gorm:"column:created_at"`
 }
+
+func (ToolInvocation) TableName() string { return "tool_invocations" }

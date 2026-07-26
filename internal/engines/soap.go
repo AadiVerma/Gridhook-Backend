@@ -13,17 +13,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// SoapEngine posts an XML envelope built from the tool's endpoint_mapping:
-//
-//	{
-//	  "soapAction": "http://example.com/GetOrder",
-//	  "envelopeTemplate": "<soap:Envelope ...>...<id>{{id}}</id>...</soap:Envelope>"
-//	}
-//
-// `envelopeTemplate` is a literal string with {{paramName}} placeholders —
-// deliberately not a full templating engine: the recipe is authored once at
-// tool-mapping time (by the WSDL parser or by hand) and never needs
-// conditionals/loops, just substitution.
 type SoapEngine struct {
 	Client *http.Client
 }
@@ -75,6 +64,6 @@ func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 	return &Result{
 		StatusCode: resp.StatusCode,
 		Headers:    flattenHeaders(resp.Header),
-		Body:       string(raw), // XML is normalized further up in ResponseShaper, not here
+		Body:       string(raw),
 	}, nil
 }

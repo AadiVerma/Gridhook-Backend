@@ -8,13 +8,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// CurlParser drafts a single tool from one pasted curl command — the
-// simplest and most common way a user hands over "here's the one endpoint I
-// need." It recognizes -X/--request, -H/--header (folded into static
-// headers), and a bare trailing URL; it does not attempt a full shell-arg
-// parse (quoting edge cases, multi-line `\` continuations with embedded
-// data payloads) — good enough for the common single-line case, with the
-// visual tool-mapping editor as the fallback for anything hairier.
 type CurlParser struct{}
 
 func (p *CurlParser) Parse(raw []byte) (*ParseResult, error) {
@@ -77,8 +70,6 @@ func (p *CurlParser) Parse(raw []byte) (*ParseResult, error) {
 	}, nil
 }
 
-// tokenize is a minimal shell-word splitter: handles quoted strings, not
-// full POSIX shell semantics (backslash escapes inside quotes, etc).
 func tokenize(s string) []string {
 	var fields []string
 	var current strings.Builder

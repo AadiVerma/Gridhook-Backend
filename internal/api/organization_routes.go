@@ -69,11 +69,6 @@ func registerOrganizationRoutes(r chi.Router, d Deps) {
 	})
 }
 
-// requireOwnOrg is the single enforcement point mentioned in APIDOC.md's
-// conventions: every resource is scoped to the caller's organization, and
-// that scoping happens here, not per-handler. Every other route file below
-// calls orgIDFromContext directly for the same reason — it's one function,
-// not a scattered convention.
 func requireOwnOrg(w http.ResponseWriter, r *http.Request, requestedID int64) (int64, bool) {
 	orgID := orgIDFromContext(r)
 	if requestedID != orgID {

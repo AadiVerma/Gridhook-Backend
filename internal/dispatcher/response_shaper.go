@@ -2,16 +2,6 @@ package dispatcher
 
 import "strings"
 
-// applyResponseMapping is ResponseShaper from ARCHITECTURE.md's component
-// list. A tool's response_mapping is a small, declarative reshape recipe —
-// no scripting language, just dot-path selection/renaming, since the whole
-// point of the pipeline is that the shape was decided at config time, not
-// computed by logic at dispatch time.
-//
-//	{"select": "data.items"}
-//	{"rename": {"orderId": "data.order.id", "status": "data.order.state"}}
-//
-// An empty/nil mapping returns body unchanged.
 func applyResponseMapping(mapping map[string]any, body any) any {
 	if len(mapping) == 0 {
 		return body

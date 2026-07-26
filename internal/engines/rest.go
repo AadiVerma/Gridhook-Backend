@@ -15,20 +15,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// RestEngine calls a plain HTTP/JSON endpoint. A tool's endpoint_mapping
-// classifies each input key so the same `input` map can be split across the
-// URL path, the query string, and the JSON body:
-//
-//	{
-//	  "pathParams":  ["id"],
-//	  "queryParams": ["limit", "offset"],
-//	  "bodyParams":  ["name", "email"],
-//	  "headers":     {"X-Custom-Header": "static-value"}
-//	}
-//
-// Any input key not classified falls back to the body for POST/PUT/PATCH,
-// or the query string for GET/DELETE — so a minimal endpoint_mapping (or an
-// empty one) still works for simple tools.
 type RestEngine struct {
 	Client *http.Client
 }
@@ -147,8 +133,6 @@ func toSet(v any) map[string]bool {
 	return set
 }
 
-// substitutePath replaces {param} placeholders in the tool's path template
-// and returns the remaining, un-consumed input keys for query/body routing.
 func substitutePath(pathTemplate string, pathParams map[string]bool, input map[string]any) (string, map[string]any, error) {
 	remaining := make(map[string]any, len(input))
 	for k, v := range input {

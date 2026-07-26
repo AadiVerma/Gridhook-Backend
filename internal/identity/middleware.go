@@ -13,11 +13,6 @@ type ctxKey string
 
 const userCtxKey ctxKey = "gridhook.currentUser"
 
-// RequireSession is the admin-API equivalent of trd.md's verify_session
-// FastAPI dependency: it runs before any handler below it, resolves the
-// bearer token, and stops the request cold on failure. Handlers read the
-// user back out with UserFromContext — they never touch SessionService
-// directly.
 func RequireSession(svc *SessionService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -8,11 +8,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// PostmanParser drafts one tool per request in a Postman v2.1 collection.
-// Postman requests are already concrete (a literal method/URL/body), so —
-// unlike OpenAPI — there's no parameter/schema metadata to recover; path
-// variables ({{var}} or :var) become pathParams and the rest of the query
-// string becomes queryParams, matching RestEngine's mapping shape.
 type PostmanParser struct{}
 
 type postmanCollection struct {
@@ -21,7 +16,7 @@ type postmanCollection struct {
 
 type postmanItem struct {
 	Name    string        `json:"name"`
-	Item    []postmanItem `json:"item,omitempty"` // folders nest more items
+	Item    []postmanItem `json:"item,omitempty"`
 	Request *struct {
 		Method string `json:"method"`
 		URL    struct {

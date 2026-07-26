@@ -5,33 +5,28 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// OrganizationService backs Phase 2 — the org profile itself. Creation
-// happens in identity.AuthService.Register (it's part of the signup
-// bootstrap); this service only reads/updates/deletes an existing one.
 type OrganizationService struct {
-	pool *pgxpool.Pool
+	db *gorm.DB
 }
 
-func NewOrganizationService(pool *pgxpool.Pool) *OrganizationService {
-	return &OrganizationService{pool: pool}
+func NewOrganizationService(gdb *gorm.DB) *OrganizationService {
+	return &OrganizationService{db: gdb}
 }
 
 func (s *OrganizationService) Get(ctx context.Context, id int64) (*models.Organization, error) {
-	o := &models.Organization{ID: id}
-	err := s.pool.QueryRow(ctx, `
-		SELECT company_id, tenant_id, name, slug, timezone, created_at
-		FROM organizations WHERE id = $1
-	`, id).Scan(&o.CompanyID, &o.TenantID, &o.Name, &o.Slug, &o.Timezone, &o.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+	o := &models.Organization{}
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(o).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
-	return o, err
+	return o, nil
 }
 
 type UpdateOrganizationInput struct {
@@ -40,26 +35,30 @@ type UpdateOrganizationInput struct {
 }
 
 func (s *OrganizationService) Update(ctx context.Context, id int64, in UpdateOrganizationInput) (*models.Organization, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE organizations SET name = coalesce($2, name), timezone = coalesce($3, timezone) WHERE id = $1
-	`, id, in.Name, in.Timezone)
-	if err != nil {
-		return nil, fmt.Errorf("controlplane: update organization: %w", err)
+	updates := map[string]any{}
+	if in.Name != nil {
+		updates["name"] = *in.Name
 	}
-	if tag.RowsAffected() == 0 {
+	if in.Timezone != nil {
+		updates["timezone"] = *in.Timezone
+	}
+
+	tx := s.db.WithContext(ctx).Model(&models.Organization{}).Where("id = ?", id).Updates(updates)
+	if tx.Error != nil {
+		return nil, fmt.Errorf("controlplane: update organization: %w", tx.Error)
+	}
+	if tx.RowsAffected == 0 {
 		return nil, ErrNotFound
 	}
 	return s.Get(ctx, id)
 }
 
-// Delete cascades everything below via the schema's ON DELETE CASCADE
-// chain (connectors, mcp_servers, users, sessions, ...). Danger-zone only.
 func (s *OrganizationService) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM organizations WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("controlplane: delete organization: %w", err)
+	tx := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.Organization{})
+	if tx.Error != nil {
+		return fmt.Errorf("controlplane: delete organization: %w", tx.Error)
 	}
-	if tag.RowsAffected() == 0 {
+	if tx.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil

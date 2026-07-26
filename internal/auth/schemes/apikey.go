@@ -7,9 +7,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// APIKeyScheme attaches a static key as a header (default) — the header
-// name is configurable per connector since upstreams vary ("X-API-Key",
-// "Ocp-Apim-Subscription-Key", etc).
 type APIKeyScheme struct{}
 
 func (APIKeyScheme) Resolve(_ context.Context, creds *models.ConnectorCredentials) (Credentials, error) {

@@ -1,8 +1,3 @@
-// Package api wires every admin-facing route from APIDOC.md plus the
-// MCP-client-facing runtime routes onto one chi.Mux. Handlers stay thin:
-// decode request -> call one controlplane/dispatcher method -> encode
-// response. Query/business logic lives in internal/controlplane and
-// internal/dispatcher, not here.
 package api
 
 import (
@@ -34,7 +29,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// apiError matches APIDOC.md's error envelope: { error: { code, message, field? } }.
 func apiError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]string{"code": code, "message": message},
@@ -71,7 +65,6 @@ func pagination(r *http.Request) page {
 	return p
 }
 
-// paginated matches APIDOC.md's list envelope: { data, page, pageSize, total }.
 func paginated(data any, p page, total int) map[string]any {
 	return map[string]any{
 		"data":     data,
@@ -81,9 +74,6 @@ func paginated(data any, p page, total int) map[string]any {
 	}
 }
 
-// intIDParam parses a chi URL path parameter as an int64 primary-key id. On
-// failure it writes the 400 itself; callers must return immediately when ok
-// is false.
 func intIDParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
 	v, err := strconv.ParseInt(chi.URLParam(r, name), 10, 64)
 	if err != nil {
@@ -93,9 +83,6 @@ func intIDParam(w http.ResponseWriter, r *http.Request, name string) (int64, boo
 	return v, true
 }
 
-// intQueryParam parses an optional query-string id. Absent -> (0, true),
-// matching this codebase's 0-sentinel convention for "not set".
-// Present-but-invalid -> writes 400 and returns ok=false.
 func intQueryParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
 	raw := r.URL.Query().Get(name)
 	if raw == "" {
@@ -109,8 +96,6 @@ func intQueryParam(w http.ResponseWriter, r *http.Request, name string) (int64, 
 	return v, true
 }
 
-// formatOptionalID renders a possibly-unset (0-sentinel) id as blank for
-// display/export, matching the pre-conversion coalesce(x::text,”) behavior.
 func formatOptionalID(id int64) string {
 	if id == 0 {
 		return ""

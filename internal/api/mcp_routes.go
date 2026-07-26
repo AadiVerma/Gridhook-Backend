@@ -11,18 +11,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// registerMCPRoutes is the MCP-client-facing contract from
-// ARCHITECTURE.md §3 — gw.gridhook.dev/mcp/:slug. It authenticates with the
-// gh_live_/gh_test_ API key from Phase 7 (never the admin JWT), resolves
-// tools scoped to exactly this server's assigned tool groups, and dispatches
-// through the same Dispatcher the admin API's "run" endpoint uses.
-//
-// The routes below expose the resolution/auth/dispatch wiring as plain
-// JSON over HTTP (GET .../tools, POST .../ with {"tool","input"}) rather
-// than implementing the full MCP JSON-RPC/SSE transport — swapping the
-// transport layer on top of this dispatch path is a separate, orthogonal
-// piece of work (a real `github.com/modelcontextprotocol/go-sdk` server
-// sitting in front of the same Deps.Dispatcher/Deps.Tools calls below).
 func registerMCPRoutes(r chi.Router, d Deps) {
 	r.Use(requireMCPAPIKey(d))
 
@@ -63,9 +51,6 @@ type mcpAuthCtxKey string
 
 const mcpServerCtxKey mcpAuthCtxKey = "gridhook.mcpServer"
 
-// requireMCPAPIKey verifies the gh_live_/gh_test_ key and confirms it
-// belongs to the server named in the URL's :slug — a key scoped to one
-// server can't be replayed against another by guessing its slug.
 func requireMCPAPIKey(d Deps) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,11 +83,6 @@ func mcpServerFromContext(r *http.Request) *models.MCPServer {
 	return srv
 }
 
-// toMCPToolSchemas shapes each tool the way an MCP `tools/list` response
-// describes one: name, human description, and a JSON-schema `inputSchema` —
-// internal fields like endpoint_mapping/response_mapping never leave this
-// boundary, since they're this platform's own dispatch recipe, not part of
-// the protocol contract an LLM client understands.
 func toMCPToolSchemas(tools []*models.MCPTool) []map[string]any {
 	out := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {

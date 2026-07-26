@@ -1,9 +1,3 @@
-// Command worker runs everything ARCHITECTURE.md §4 assigns to the
-// background process: session sweeping, connector health checks, and (once
-// a real external module source is wired up) module_sync. Implemented as a
-// plain ticker loop per trd.md's tech-stack note that the background
-// scheduler choice was "not yet decided" — swap for a real job queue only
-// if volume demands it.
 package main
 
 import (
@@ -36,7 +30,7 @@ func main() {
 	}
 	defer database.Close()
 
-	sessions := identity.NewSessionService(database.Pool, cfg.SessionTTL)
+	sessions := identity.NewSessionService(database.DB, cfg.SessionTTL)
 
 	sweepTicker := time.NewTicker(1 * time.Hour)
 	defer sweepTicker.Stop()
@@ -56,10 +50,6 @@ func main() {
 			if n > 0 {
 				slog.Info("worker: swept expired sessions", "count", n)
 			}
-			// TODO: connector health-check sweep (controlplane.ConnectorService.HealthCheck
-			// per active connector) and module_sync once an external module
-			// source (e.g. a calling system's own /modules endpoint) is
-			// configured per-connector.
 		}
 	}
 }

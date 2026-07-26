@@ -1,6 +1,3 @@
-// Command server runs the admin API + MCP runtime in one process — per
-// ARCHITECTURE.md §5, "one process for Connector+Auth+MCP API, one process
-// for the background worker" (cmd/worker).
 package main
 
 import (
@@ -52,17 +49,17 @@ func run() error {
 		return err
 	}
 
-	sessions := identity.NewSessionService(database.Pool, cfg.SessionTTL)
-	authSvc := identity.NewAuthService(database.Pool, sessions)
-	users := identity.NewUserService(database.Pool)
-	orgs := controlplane.NewOrganizationService(database.Pool)
-	connectors := controlplane.NewConnectorService(database.Pool)
-	apis := controlplane.NewAPIService(database.Pool, sealer)
-	tools := controlplane.NewToolService(database.Pool)
-	groups := controlplane.NewGroupService(database.Pool)
-	servers := controlplane.NewMCPServerService(database.Pool, cfg.MCPPublicBaseURL)
+	sessions := identity.NewSessionService(database.DB, cfg.SessionTTL)
+	authSvc := identity.NewAuthService(database.DB, sessions)
+	users := identity.NewUserService(database.DB)
+	orgs := controlplane.NewOrganizationService(database.DB)
+	connectors := controlplane.NewConnectorService(database.DB)
+	apis := controlplane.NewAPIService(database.DB, sealer)
+	tools := controlplane.NewToolService(database.DB)
+	groups := controlplane.NewGroupService(database.DB)
+	servers := controlplane.NewMCPServerService(database.DB, cfg.MCPPublicBaseURL)
 
-	auditLogger := audit.NewLogger(database.Pool, 4096)
+	auditLogger := audit.NewLogger(database.DB, 4096)
 	broker := auth.NewBroker(apis, auth.NewInMemoryTokenCache())
 	engineRegistry := engines.NewRegistry()
 	dispatch := dispatcher.New(tools, broker, engineRegistry, auditLogger)
@@ -108,11 +105,6 @@ func run() error {
 	}
 }
 
-// loadSealer builds the AES-GCM Sealer from KMS_DATA_KEY (a 32-byte key,
-// base64 or raw, provided by whatever secrets manager fronts this
-// deployment). Falls back to a deterministic dev-only key so local
-// development doesn't require KMS wiring — never use the fallback in
-// production, it provides no real confidentiality.
 func loadSealer() (appdb.Sealer, error) {
 	raw := os.Getenv("KMS_DATA_KEY")
 	if raw == "" {
@@ -120,6 +112,6 @@ func loadSealer() (appdb.Sealer, error) {
 		devKey := sha256.Sum256([]byte("gridhook-dev-only-key-do-not-use-in-prod"))
 		return appdb.NewAESSealer(devKey[:])
 	}
-	key := sha256.Sum256([]byte(raw)) // normalize any provided secret to 32 bytes
+	key := sha256.Sum256([]byte(raw))
 	return appdb.NewAESSealer(key[:])
 }

@@ -4,17 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// ListFilter covers everything /audit-logs accepts: status/connector/server/
-// tool + a date range, plus pagination.
 type ListFilter struct {
 	Status      string
 	ConnectorID int64
@@ -26,7 +22,11 @@ type ListFilter struct {
 	PageSize    int
 }
 
-func listInvocations(ctx context.Context, pool *pgxpool.Pool, orgID int64, f ListFilter) ([]*models.ToolInvocation, int, error) {
+const invocationSelect = `id, tool_id, connector_id, connector_api_id, coalesce(mcp_server_id,0) AS mcp_server_id, organization_id,
+	coalesce(user_id,0) AS user_id, coalesce(user_email,'') AS user_email, status,
+	coalesce(http_code,0) AS http_code, duration_ms, input, output, coalesce(error,'') AS error, created_at`
+
+func listInvocations(ctx context.Context, gdb *gorm.DB, orgID int64, f ListFilter) ([]*models.ToolInvocation, int, error) {
 	if f.Page < 1 {
 		f.Page = 1
 	}
@@ -34,80 +34,50 @@ func listInvocations(ctx context.Context, pool *pgxpool.Pool, orgID int64, f Lis
 		f.PageSize = 50
 	}
 
-	where := []string{"organization_id = $1"}
-	args := []any{orgID}
-	add := func(cond string, val any) {
-		args = append(args, val)
-		where = append(where, fmt.Sprintf(cond, len(args)))
+	filter := func(tx *gorm.DB) *gorm.DB {
+		tx = tx.Where("organization_id = ?", orgID)
+		if f.Status != "" {
+			tx = tx.Where("status = ?", f.Status)
+		}
+		if f.ConnectorID != 0 {
+			tx = tx.Where("connector_id = ?", f.ConnectorID)
+		}
+		if f.ServerID != 0 {
+			tx = tx.Where("mcp_server_id = ?", f.ServerID)
+		}
+		if f.ToolID != 0 {
+			tx = tx.Where("tool_id = ?", f.ToolID)
+		}
+		if f.From != nil {
+			tx = tx.Where("created_at >= ?", *f.From)
+		}
+		if f.To != nil {
+			tx = tx.Where("created_at <= ?", *f.To)
+		}
+		return tx
 	}
-	if f.Status != "" {
-		add("status = $%d", f.Status)
-	}
-	if f.ConnectorID != 0 {
-		add("connector_id = $%d", f.ConnectorID)
-	}
-	if f.ServerID != 0 {
-		add("mcp_server_id = $%d", f.ServerID)
-	}
-	if f.ToolID != 0 {
-		add("tool_id = $%d", f.ToolID)
-	}
-	if f.From != nil {
-		add("created_at >= $%d", *f.From)
-	}
-	if f.To != nil {
-		add("created_at <= $%d", *f.To)
-	}
-	whereClause := strings.Join(where, " AND ")
 
-	var total int
-	countSQL := "SELECT count(*) FROM tool_invocations WHERE " + whereClause
-	if err := pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+	var total int64
+	if err := filter(gdb.WithContext(ctx).Model(&models.ToolInvocation{})).Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("audit: count: %w", err)
 	}
 
-	args = append(args, f.PageSize, (f.Page-1)*f.PageSize)
-	listSQL := fmt.Sprintf(`
-		SELECT id, tool_id, connector_id, connector_api_id, coalesce(mcp_server_id,0), organization_id,
-		       coalesce(user_id,0), coalesce(user_email,''), status, coalesce(http_code,0), duration_ms,
-		       input, output, coalesce(error,''), created_at
-		FROM tool_invocations
-		WHERE %s
-		ORDER BY created_at DESC
-		LIMIT $%d OFFSET $%d
-	`, whereClause, len(args)-1, len(args))
-
-	rows, err := pool.Query(ctx, listSQL, args...)
+	var rows []*models.ToolInvocation
+	err := filter(gdb.WithContext(ctx).Model(&models.ToolInvocation{})).
+		Select(invocationSelect).
+		Order("created_at DESC").
+		Limit(f.PageSize).Offset((f.Page - 1) * f.PageSize).
+		Find(&rows).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("audit: list: %w", err)
 	}
-	defer rows.Close()
-
-	var out []*models.ToolInvocation
-	for rows.Next() {
-		inv := &models.ToolInvocation{}
-		if err := rows.Scan(&inv.ID, &inv.ToolID, &inv.ConnectorID, &inv.ConnectorAPIID, &inv.MCPServerID,
-			&inv.OrganizationID, &inv.UserID, &inv.UserEmail, &inv.Status, &inv.HTTPCode, &inv.DurationMs,
-			&inv.Input, &inv.Output, &inv.Error, &inv.CreatedAt); err != nil {
-			return nil, 0, fmt.Errorf("audit: scan: %w", err)
-		}
-		out = append(out, inv)
-	}
-	return out, total, rows.Err()
+	return rows, int(total), nil
 }
 
-func getInvocation(ctx context.Context, pool *pgxpool.Pool, orgID, id int64) (*models.ToolInvocation, error) {
+func getInvocation(ctx context.Context, gdb *gorm.DB, orgID, id int64) (*models.ToolInvocation, error) {
 	inv := &models.ToolInvocation{}
-	err := pool.QueryRow(ctx, `
-		SELECT id, tool_id, connector_id, connector_api_id, coalesce(mcp_server_id,0), organization_id,
-		       coalesce(user_id,0), coalesce(user_email,''), status, coalesce(http_code,0), duration_ms,
-		       input, output, coalesce(error,''), created_at
-		FROM tool_invocations
-		WHERE organization_id = $1 AND id = $2
-	`, orgID, id).Scan(&inv.ID, &inv.ToolID, &inv.ConnectorID, &inv.ConnectorAPIID, &inv.MCPServerID,
-		&inv.OrganizationID, &inv.UserID, &inv.UserEmail, &inv.Status, &inv.HTTPCode, &inv.DurationMs,
-		&inv.Input, &inv.Output, &inv.Error, &inv.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := gdb.WithContext(ctx).Select(invocationSelect).Where("organization_id = ? AND id = ?", orgID, id).First(inv).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("audit: invocation %d not found", id)
 	}
 	return inv, err

@@ -75,11 +75,6 @@ func registerMCPServerRoutes(r chi.Router, d Deps) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// "Assign a whole connector" from the UI: expands to every tool_group
-	// that has at least one tool under each given connector, then replaces
-	// the server's full group assignment — this is the mechanism that
-	// makes group-wise LLM invocation transparent to a UI that still just
-	// thinks in terms of "assign this connector."
 	r.Put("/mcp-servers/{id}/connectors", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ConnectorIDs []int64 `json:"connectorIds"`
@@ -113,8 +108,6 @@ func registerMCPServerRoutes(r chi.Router, d Deps) {
 		writeJSON(w, http.StatusOK, srv)
 	})
 
-	// Finer-grained equivalent for clients that want to assign specific
-	// tool_groups directly rather than whole connectors.
 	r.Put("/mcp-servers/{id}/tool-groups", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ToolGroupIDs []int64 `json:"toolGroupIds"`
@@ -182,7 +175,6 @@ func registerAPIKeyRoutes(r chi.Router, d Deps) {
 			handleServiceError(w, err)
 			return
 		}
-		// The full secret is returned exactly once, here, and never again.
 		writeJSON(w, http.StatusCreated, map[string]any{"key": fullKey, "meta": key})
 	})
 

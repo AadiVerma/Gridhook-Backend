@@ -8,12 +8,6 @@ import (
 	"gridhook.dev/connector-backend/internal/controlplane"
 )
 
-// registerGroupRoutes backs /tool-groups — not in APIDOC.md's original
-// contract (that doc predates the multi-API/grouping requirement) but
-// additive under the same /api/v1 prefix and auth. This is the admin
-// surface for the clustering ARCHITECTURE.md §6 describes: create a group,
-// assign tools to it, then assign the group to one or more MCP servers via
-// mcpserver_routes.go's PUT /mcp-servers/:id/connectors.
 func registerGroupRoutes(r chi.Router, d Deps) {
 	r.Get("/tool-groups", func(w http.ResponseWriter, r *http.Request) {
 		groups, err := d.Groups.List(r.Context(), orgIDFromContext(r))
@@ -63,7 +57,6 @@ func registerGroupRoutes(r chi.Router, d Deps) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Body: {"toolIds": [1, 2]} — moves each tool into this group.
 	r.Put("/tool-groups/{id}/tools", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ToolIDs []int64 `json:"toolIds"`

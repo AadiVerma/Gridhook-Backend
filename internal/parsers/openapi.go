@@ -8,12 +8,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// OpenAPIParser handles OpenAPI 3.x JSON documents (YAML specs are expected
-// to be converted to JSON by the upload handler before reaching here, to
-// keep this package dependency-free). It walks every path/method/operation
-// and drafts one tool per operation, classifying each parameter's `in`
-// (path/query/header) directly into the endpoint_mapping shape RestEngine
-// expects.
 type OpenAPIParser struct{}
 
 func (p *OpenAPIParser) Parse(raw []byte) (*ParseResult, error) {
@@ -49,7 +43,7 @@ func (p *OpenAPIParser) Parse(raw []byte) (*ParseResult, error) {
 			switch httpMethod {
 			case models.MethodGET, models.MethodPOST, models.MethodPUT, models.MethodPATCH, models.MethodDELETE:
 			default:
-				continue // skip HEAD/OPTIONS/TRACE — not tool-worthy
+				continue
 			}
 
 			name := op.OperationID
@@ -75,7 +69,7 @@ func (p *OpenAPIParser) Parse(raw []byte) (*ParseResult, error) {
 
 			var bodyParams []string
 			if op.RequestBody != nil {
-				bodyParams = []string{"body"} // whole-body pass-through; refined later by the visual tool-mapping editor
+				bodyParams = []string{"body"}
 			}
 
 			result.Tools = append(result.Tools, DraftTool{

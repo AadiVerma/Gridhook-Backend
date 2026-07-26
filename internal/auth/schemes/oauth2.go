@@ -12,9 +12,6 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-// OAuth2Scheme implements the client-credentials grant — the only grant a
-// server-to-server connector needs (no user present to redirect through an
-// authorization-code flow).
 type OAuth2Scheme struct {
 	HTTPClient *http.Client
 }
