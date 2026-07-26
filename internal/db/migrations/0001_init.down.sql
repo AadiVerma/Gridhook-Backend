@@ -1,0 +1,27 @@
+DROP TABLE IF EXISTS tool_invocations;
+DROP TABLE IF EXISTS mcp_server_api_keys;
+DROP TABLE IF EXISTS mcp_server_tool_groups;
+DROP TABLE IF EXISTS mcp_servers;
+DROP TABLE IF EXISTS mcp_tools;
+DROP TABLE IF EXISTS tool_groups;
+DROP TABLE IF EXISTS modules;
+DROP TABLE IF EXISTS connector_user_mappings;
+DROP TABLE IF EXISTS connector_credentials;
+DROP TABLE IF EXISTS connector_apis;
+DROP TABLE IF EXISTS connectors;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS tenants;
+DROP TABLE IF EXISTS companies;
+
+DROP TYPE IF EXISTS invocation_status;
+DROP TYPE IF EXISTS mcp_server_status;
+DROP TYPE IF EXISTS tool_status;
+DROP TYPE IF EXISTS http_method;
+DROP TYPE IF EXISTS tool_group_kind;
+DROP TYPE IF EXISTS auth_type;
+DROP TYPE IF EXISTS engine_type;
+DROP TYPE IF EXISTS connector_status;
+DROP TYPE IF EXISTS user_status;
+DROP TYPE IF EXISTS user_role;

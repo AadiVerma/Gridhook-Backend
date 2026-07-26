@@ -1,0 +1,23 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+
+# Go tooling
+*.out
+coverage.txt
+coverage.html
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
