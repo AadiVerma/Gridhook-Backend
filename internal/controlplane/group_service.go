@@ -118,7 +118,7 @@ func (s *GroupService) SetServerGroups(ctx context.Context, mcpServerID int64, g
 	if err != nil {
 		return fmt.Errorf("controlplane: set server groups: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `DELETE FROM mcp_server_tool_groups WHERE mcp_server_id = $1`, mcpServerID); err != nil {
 		return fmt.Errorf("controlplane: set server groups: clear: %w", err)
@@ -167,7 +167,7 @@ func (s *GroupService) SyncModules(ctx context.Context, modules []models.Module)
 	if err != nil {
 		return fmt.Errorf("controlplane: sync modules: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, m := range modules {
 		_, err := tx.Exec(ctx, `

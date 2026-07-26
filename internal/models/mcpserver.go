@@ -28,7 +28,6 @@ type MCPServer struct {
 	APIKeyCount      int     `json:"apiKeyCount"`
 }
 
-
 type MCPServerAPIKey struct {
 	ID          int64      `json:"id"`
 	MCPServerID int64      `json:"mcpServerId"`

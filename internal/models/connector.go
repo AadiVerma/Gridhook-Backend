@@ -45,7 +45,6 @@ type Connector struct {
 	PrimaryAuthType AuthType   `json:"authType,omitempty"`
 }
 
-
 type ConnectorAPI struct {
 	ID          int64      `json:"id"`
 	ConnectorID int64      `json:"connectorId"`

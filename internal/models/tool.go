@@ -33,7 +33,6 @@ type Module struct {
 	SyncedAt time.Time `json:"syncedAt"`
 }
 
-
 type ToolGroup struct {
 	ID              int64         `json:"id"`
 	OrganizationID  int64         `json:"organizationId"`
@@ -46,7 +45,6 @@ type ToolGroup struct {
 	UpdatedAt       time.Time     `json:"updatedAt"`
 	ToolCount       int           `json:"toolCount,omitempty"`
 }
-
 
 type MCPTool struct {
 	ID                int64          `json:"id"`

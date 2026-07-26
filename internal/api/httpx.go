@@ -110,7 +110,7 @@ func intQueryParam(w http.ResponseWriter, r *http.Request, name string) (int64, 
 }
 
 // formatOptionalID renders a possibly-unset (0-sentinel) id as blank for
-// display/export, matching the pre-conversion coalesce(x::text,'') behavior.
+// display/export, matching the pre-conversion coalesce(x::text,”) behavior.
 func formatOptionalID(id int64) string {
 	if id == 0 {
 		return ""

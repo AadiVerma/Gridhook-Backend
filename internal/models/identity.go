@@ -55,7 +55,6 @@ type User struct {
 	CreatedAt      time.Time  `json:"createdAt"`
 }
 
-
 type Session struct {
 	ID          int64      `json:"id"`
 	UserID      int64      `json:"userId"`

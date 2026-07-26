@@ -61,7 +61,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResu
 	if err != nil {
 		return nil, fmt.Errorf("identity: register: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var tenantID int64
 	err = tx.QueryRow(ctx, `SELECT id FROM tenants WHERE domain = $1`, domain).Scan(&tenantID)
