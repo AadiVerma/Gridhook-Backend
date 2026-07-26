@@ -12,7 +12,10 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-var ErrUserNotFound = errors.New("identity: user not found")
+var (
+	ErrUserNotFound   = errors.New("identity: user not found")
+	ErrAlreadyAMember = errors.New("identity: already a member of this organization")
+)
 
 type UserService struct {
 	db *gorm.DB
@@ -30,17 +33,46 @@ func (s *UserService) List(ctx context.Context, orgID int64) ([]*models.User, er
 	return users, nil
 }
 
+// Invite adds email as a member of orgID. If that email already has a row
+// in another organization, its existing password_hash is copied over (so
+// they keep logging in with the same password everywhere — see Login's
+// invariant); otherwise a random placeholder password is set, pending the
+// accept-invite flow.
 func (s *UserService) Invite(ctx context.Context, orgID int64, email, name string, role models.UserRole) (*models.User, error) {
-	placeholder := make([]byte, 32)
-	if _, err := rand.Read(placeholder); err != nil {
-		return nil, err
+	var alreadyMember int64
+	if err := s.db.WithContext(ctx).Model(&models.User{}).
+		Where("email = ? AND organization_id = ?", email, orgID).Count(&alreadyMember).Error; err != nil {
+		return nil, fmt.Errorf("identity: invite user: check membership: %w", err)
 	}
-	hash, err := HashPassword(base64.RawURLEncoding.EncodeToString(placeholder))
-	if err != nil {
-		return nil, err
+	if alreadyMember > 0 {
+		return nil, ErrAlreadyAMember
 	}
 
-	u := &models.User{OrganizationID: orgID, Email: email, Name: name, PasswordHash: hash, Role: role, Status: models.UserStatusInvited}
+	var existing struct {
+		PasswordHash string `gorm:"column:password_hash"`
+	}
+	err := s.db.WithContext(ctx).Model(&models.User{}).Select("password_hash").Where("email = ?", email).Take(&existing).Error
+
+	var passwordHash string
+	status := models.UserStatusActive
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		placeholder := make([]byte, 32)
+		if _, err := rand.Read(placeholder); err != nil {
+			return nil, err
+		}
+		passwordHash, err = HashPassword(base64.RawURLEncoding.EncodeToString(placeholder))
+		if err != nil {
+			return nil, err
+		}
+		status = models.UserStatusInvited
+	case err != nil:
+		return nil, fmt.Errorf("identity: invite user: resolve existing password: %w", err)
+	default:
+		passwordHash = existing.PasswordHash
+	}
+
+	u := &models.User{OrganizationID: orgID, Email: email, Name: name, PasswordHash: passwordHash, Role: role, Status: status}
 	if err := s.db.WithContext(ctx).Create(u).Error; err != nil {
 		return nil, fmt.Errorf("identity: invite user: %w", err)
 	}

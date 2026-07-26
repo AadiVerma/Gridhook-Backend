@@ -65,19 +65,20 @@ func run() error {
 	dispatch := dispatcher.New(tools, broker, engineRegistry, auditLogger)
 
 	router := api.NewRouter(api.Deps{
-		Sessions:      sessions,
-		Auth:          authSvc,
-		Users:         users,
-		Organizations: orgs,
-		Connectors:    connectors,
-		APIs:          apis,
-		Tools:         tools,
-		Groups:        groups,
-		Servers:       servers,
-		Audit:         auditLogger,
-		Dispatcher:    dispatch,
-		Parsers:       parsers.NewRegistry(),
-		InternalToken: os.Getenv("INTERNAL_TOKEN"),
+		Sessions:       sessions,
+		Auth:           authSvc,
+		Users:          users,
+		Organizations:  orgs,
+		Connectors:     connectors,
+		APIs:           apis,
+		Tools:          tools,
+		Groups:         groups,
+		Servers:        servers,
+		Audit:          auditLogger,
+		Dispatcher:     dispatch,
+		Parsers:        parsers.NewRegistry(),
+		InternalToken:  os.Getenv("INTERNAL_TOKEN"),
+		AllowedOrigins: cfg.CORSAllowedOrigins,
 	})
 
 	httpServer := &http.Server{

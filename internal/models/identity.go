@@ -47,6 +47,10 @@ type Organization struct {
 
 func (Organization) TableName() string { return "organizations" }
 
+// User is one row per (email, organization) — the same email can have
+// multiple rows across different organizations (each joined via an invite,
+// built later), each with its own role/status. UNIQUE(email, organization_id)
+// enforces at most one row per org for a given email.
 type User struct {
 	ID             int64      `json:"id" gorm:"column:id;primaryKey"`
 	OrganizationID int64      `json:"organizationId" gorm:"column:organization_id"`

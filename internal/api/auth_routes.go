@@ -14,15 +14,19 @@ func registerAuthRoutes(r chi.Router, d Deps) {
 	r.Post("/auth/login", handleLogin(d))
 	r.Post("/auth/logout", handleLogout(d))
 	r.Get("/auth/me", identity.RequireSession(d.Sessions)(http.HandlerFunc(handleMe)).ServeHTTP)
-
-	r.Post("/auth/forgot-password", notImplemented)
-	r.Post("/auth/reset-password", notImplemented)
-	r.Post("/auth/verify-email", notImplemented)
-	r.Post("/auth/accept-invite", notImplemented)
 }
 
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	apiError(w, http.StatusNotImplemented, "not_implemented", "this endpoint is not wired to an email/token delivery provider yet")
+func orgMembershipsJSON(memberships []identity.OrgMembership) []map[string]any {
+	orgs := make([]map[string]any, len(memberships))
+	for i, m := range memberships {
+		orgs[i] = map[string]any{
+			"id":   m.OrganizationID,
+			"name": m.OrganizationName,
+			"slug": m.OrganizationSlug,
+			"role": m.Role,
+		}
+	}
+	return orgs
 }
 
 func handleRegister(d Deps) http.HandlerFunc {
@@ -41,7 +45,7 @@ func handleRegister(d Deps) http.HandlerFunc {
 			Name: body.Name, Email: body.Email, Password: body.Password, Organization: body.Organization,
 		})
 		if errors.Is(err, identity.ErrEmailTaken) {
-			apiError(w, http.StatusConflict, "email_taken", "an account with this email already exists")
+			apiError(w, http.StatusConflict, "email_taken", "an account with this email already exists — log in instead")
 			return
 		}
 		if err != nil {
@@ -58,20 +62,29 @@ func handleRegister(d Deps) http.HandlerFunc {
 func handleLogin(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
+			Email          string `json:"email"`
+			Password       string `json:"password"`
+			OrganizationID int64  `json:"organizationId"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
-		result, err := d.Auth.Login(r.Context(), body.Email, body.Password)
+		result, memberships, err := d.Auth.Login(r.Context(), body.Email, body.Password, body.OrganizationID)
 		if errors.Is(err, identity.ErrInvalidCredentials) {
 			apiError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
 			return
 		}
+		if errors.Is(err, identity.ErrNotAMember) {
+			apiError(w, http.StatusForbidden, "not_a_member", "this account is not a member of that organization")
+			return
+		}
 		if err != nil {
 			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		if result == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"organizations": orgMembershipsJSON(memberships)})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{

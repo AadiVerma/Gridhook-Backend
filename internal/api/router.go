@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 
 	"gridhook.dev/connector-backend/internal/audit"
 	"gridhook.dev/connector-backend/internal/controlplane"
@@ -14,19 +15,20 @@ import (
 )
 
 type Deps struct {
-	Sessions      *identity.SessionService
-	Auth          *identity.AuthService
-	Users         *identity.UserService
-	Organizations *controlplane.OrganizationService
-	Connectors    *controlplane.ConnectorService
-	APIs          *controlplane.APIService
-	Tools         *controlplane.ToolService
-	Groups        *controlplane.GroupService
-	Servers       *controlplane.MCPServerService
-	Audit         *audit.Logger
-	Dispatcher    *dispatcher.Dispatcher
-	Parsers       *parsers.Registry
-	InternalToken string
+	Sessions       *identity.SessionService
+	Auth           *identity.AuthService
+	Users          *identity.UserService
+	Organizations  *controlplane.OrganizationService
+	Connectors     *controlplane.ConnectorService
+	APIs           *controlplane.APIService
+	Tools          *controlplane.ToolService
+	Groups         *controlplane.GroupService
+	Servers        *controlplane.MCPServerService
+	Audit          *audit.Logger
+	Dispatcher     *dispatcher.Dispatcher
+	Parsers        *parsers.Registry
+	InternalToken  string
+	AllowedOrigins []string
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -34,6 +36,13 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   d.AllowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	r.Route("/mcp", func(r chi.Router) {
 		registerMCPRoutes(r, d)
