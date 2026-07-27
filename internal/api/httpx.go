@@ -14,6 +14,28 @@ import (
 	"gridhook.dev/connector-backend/internal/identity"
 )
 
+type nullableID struct {
+	set   bool
+	value *int64
+}
+
+func (n *nullableID) UnmarshalJSON(data []byte) error {
+	n.set = true
+	if string(data) == "null" {
+		n.value = nil
+		return nil
+	}
+	return json.Unmarshal(data, &n.value)
+}
+
+func (n nullableID) ptr() **int64 {
+	if !n.set {
+		return nil
+	}
+	v := n.value
+	return &v
+}
+
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "

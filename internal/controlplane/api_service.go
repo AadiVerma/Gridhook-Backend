@@ -27,6 +27,7 @@ type CreateAPIInput struct {
 	BaseURL    string
 	AuthType   models.AuthType
 	SpecURL    string
+	GroupID    *int64
 }
 
 func (s *APIService) Create(ctx context.Context, connectorID int64, in CreateAPIInput) (*models.ConnectorAPI, error) {
@@ -38,6 +39,7 @@ func (s *APIService) Create(ctx context.Context, connectorID int64, in CreateAPI
 		AuthType:    in.AuthType,
 		SpecURL:     in.SpecURL,
 		IsActive:    true,
+		GroupID:     in.GroupID,
 	}
 	if err := s.db.WithContext(ctx).Create(api).Error; err != nil {
 		return nil, fmt.Errorf("controlplane: create connector_api: %w", err)
@@ -53,6 +55,16 @@ func (s *APIService) ListByConnector(ctx context.Context, connectorID int64) ([]
 	return apis, nil
 }
 
+func (s *APIService) ListByGroup(ctx context.Context, connectorID, groupID int64) ([]*models.ConnectorAPI, error) {
+	var apis []*models.ConnectorAPI
+	err := s.db.WithContext(ctx).Where("connector_id = ? AND group_id = ?", connectorID, groupID).
+		Order("created_at").Find(&apis).Error
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: list connector_apis by group: %w", err)
+	}
+	return apis, nil
+}
+
 func (s *APIService) Get(ctx context.Context, id int64) (*models.ConnectorAPI, error) {
 	api := &models.ConnectorAPI{}
 	err := s.db.WithContext(ctx).Where("id = ?", id).First(api).Error
@@ -60,6 +72,46 @@ func (s *APIService) Get(ctx context.Context, id int64) (*models.ConnectorAPI, e
 		return nil, ErrNotFound
 	}
 	return api, err
+}
+
+type UpdateAPIInput struct {
+	Name     *string
+	BaseURL  *string
+	AuthType *models.AuthType
+	IsActive *bool
+	GroupID  **int64
+}
+
+func (s *APIService) Update(ctx context.Context, id int64, in UpdateAPIInput) (*models.ConnectorAPI, error) {
+	updates := map[string]any{}
+	if in.Name != nil {
+		updates["name"] = *in.Name
+	}
+	if in.BaseURL != nil {
+		updates["base_url"] = *in.BaseURL
+	}
+	if in.AuthType != nil {
+		updates["auth_type"] = *in.AuthType
+	}
+	if in.IsActive != nil {
+		updates["is_active"] = *in.IsActive
+	}
+	if in.GroupID != nil {
+		updates["group_id"] = *in.GroupID
+	}
+	if len(updates) == 0 {
+		return s.Get(ctx, id)
+	}
+	updates["updated_at"] = gorm.Expr("now()")
+
+	res := s.db.WithContext(ctx).Model(&models.ConnectorAPI{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return nil, fmt.Errorf("controlplane: update connector_api: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrNotFound
+	}
+	return s.Get(ctx, id)
 }
 
 type PutCredentialsInput struct {
@@ -76,9 +128,17 @@ type PutCredentialsInput struct {
 }
 
 func (s *APIService) PutCredentials(ctx context.Context, connectorAPIID int64, in PutCredentialsInput) error {
+	authType := in.AuthType
+	if authType == "" {
+		api, err := s.Get(ctx, connectorAPIID)
+		if err != nil {
+			return fmt.Errorf("controlplane: put credentials: resolve auth type: %w", err)
+		}
+		authType = api.AuthType
+	}
 	cred := &models.ConnectorCredentials{
 		ConnectorAPIID: connectorAPIID,
-		AuthType:       in.AuthType,
+		AuthType:       authType,
 		TokenURL:       in.TokenURL,
 		ClientID:       in.ClientID,
 		ClientSecret:   in.ClientSecret,

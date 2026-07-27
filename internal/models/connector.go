@@ -43,6 +43,12 @@ type Connector struct {
 	PrimaryType     EngineType `json:"type,omitempty" gorm:"-"`
 	PrimaryBaseURL  string     `json:"baseUrl,omitempty" gorm:"-"`
 	PrimaryAuthType AuthType   `json:"authType,omitempty" gorm:"-"`
+
+	EngineTypes []EngineType `json:"engineTypes" gorm:"-"`
+	AuthTypes   []AuthType   `json:"authTypes" gorm:"-"`
+	APICount    int          `json:"apiCount" gorm:"-"`
+	ToolCount   int          `json:"toolCount" gorm:"-"`
+	ModuleCount int          `json:"moduleCount" gorm:"-"`
 }
 
 func (Connector) TableName() string { return "connectors" }
@@ -50,6 +56,7 @@ func (Connector) TableName() string { return "connectors" }
 type ConnectorAPI struct {
 	ID          int64      `json:"id" gorm:"column:id;primaryKey"`
 	ConnectorID int64      `json:"connectorId" gorm:"column:connector_id"`
+	GroupID     *int64     `json:"groupId" gorm:"column:group_id"`
 	Name        string     `json:"name" gorm:"column:name"`
 	EngineType  EngineType `json:"engineType" gorm:"column:engine_type"`
 	BaseURL     string     `json:"baseUrl" gorm:"column:base_url"`

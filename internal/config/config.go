@@ -24,7 +24,7 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL:        getEnv("DATABASE_URL", "postgres://localhost:5432/gridhook?sslmode=disable"),
+		DatabaseURL:        getEnv("DATABASE_URL", ""),
 		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
 		SessionTTL:         30 * 24 * time.Hour,
 		KMSKeyID:           os.Getenv("KMS_KEY_ID"),

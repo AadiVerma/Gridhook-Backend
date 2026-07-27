@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -11,6 +13,17 @@ import (
 
 	"gridhook.dev/connector-backend/internal/models"
 )
+
+var slugNonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
+
+func slugify(name string) string {
+	s := slugNonAlnum.ReplaceAllString(strings.ToLower(strings.TrimSpace(name)), "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "module"
+	}
+	return s
+}
 
 type GroupService struct {
 	db *gorm.DB
@@ -27,10 +40,18 @@ type CreateGroupInput struct {
 }
 
 func (s *GroupService) Create(ctx context.Context, orgID int64, in CreateGroupInput) (*models.ToolGroup, error) {
+	slug := in.Slug
+	if slug == "" {
+		var err error
+		slug, err = s.uniqueSlug(ctx, orgID, in.Name)
+		if err != nil {
+			return nil, fmt.Errorf("controlplane: create tool_group: generate slug: %w", err)
+		}
+	}
 	g := &models.ToolGroup{
 		OrganizationID: orgID,
 		Name:           in.Name,
-		Slug:           in.Slug,
+		Slug:           slug,
 		Description:    in.Description,
 		Kind:           models.GroupManual,
 	}
@@ -38,6 +59,22 @@ func (s *GroupService) Create(ctx context.Context, orgID int64, in CreateGroupIn
 		return nil, fmt.Errorf("controlplane: create tool_group: %w", err)
 	}
 	return g, nil
+}
+
+func (s *GroupService) uniqueSlug(ctx context.Context, orgID int64, name string) (string, error) {
+	base := slugify(name)
+	slug := base
+	for attempt := 2; ; attempt++ {
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&models.ToolGroup{}).
+			Where("organization_id = ? AND slug = ?", orgID, slug).Count(&count).Error; err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return slug, nil
+		}
+		slug = fmt.Sprintf("%s-%d", base, attempt)
+	}
 }
 
 func (s *GroupService) List(ctx context.Context, orgID int64) ([]*models.ToolGroup, error) {
@@ -120,11 +157,13 @@ func (s *GroupService) SetServerGroups(ctx context.Context, mcpServerID int64, g
 func (s *GroupService) GroupsForConnector(ctx context.Context, connectorID int64) ([]int64, error) {
 	var ids []int64
 	err := s.db.WithContext(ctx).Raw(`
-		SELECT DISTINCT t.group_id
-		FROM mcp_tools t
-		JOIN connector_apis a ON a.id = t.connector_api_id
-		WHERE a.connector_id = ? AND t.group_id IS NOT NULL
-	`, connectorID).Scan(&ids).Error
+		SELECT DISTINCT group_id FROM (
+			SELECT a.group_id FROM connector_apis a WHERE a.connector_id = ? AND a.group_id IS NOT NULL
+			UNION
+			SELECT t.group_id FROM mcp_tools t JOIN connector_apis a2 ON a2.id = t.connector_api_id
+			WHERE a2.connector_id = ? AND t.group_id IS NOT NULL
+		) modules
+	`, connectorID, connectorID).Scan(&ids).Error
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: groups for connector: %w", err)
 	}

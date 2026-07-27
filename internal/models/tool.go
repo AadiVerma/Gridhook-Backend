@@ -54,7 +54,7 @@ func (ToolGroup) TableName() string { return "tool_groups" }
 type MCPTool struct {
 	ID                int64      `json:"id" gorm:"column:id;primaryKey"`
 	ConnectorAPIID    int64      `json:"connectorApiId" gorm:"column:connector_api_id"`
-	GroupID           int64      `json:"groupId,omitempty" gorm:"-"`
+	GroupID           *int64     `json:"groupId" gorm:"column:group_id"`
 	EngineType        EngineType `json:"engineType" gorm:"column:engine_type"`
 	Name              string     `json:"name" gorm:"column:name"`
 	Method            HTTPMethod `json:"method" gorm:"column:method"`

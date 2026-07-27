@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,11 +23,16 @@ func registerConnectorRoutes(r chi.Router, d Deps) {
 	r.Get("/connectors/{id}", handleGetConnector(d))
 	r.Patch("/connectors/{id}", handleUpdateConnector(d))
 	r.Delete("/connectors/{id}", handleDeleteConnector(d))
+	r.Post("/connectors/{id}/toggle", handleToggleConnector(d))
 	r.Post("/connectors/{id}/health-check", handleHealthCheckConnector(d))
 	r.Get("/connectors/{id}/export", handleExportConnector(d))
 
+	r.Get("/connectors/{id}/modules", handleListConnectorModules(d))
+	r.Post("/connectors/{id}/modules", handleCreateConnectorModule(d))
+
 	r.Get("/connectors/{id}/apis", handleListAPIs(d))
 	r.Post("/connectors/{id}/apis", handleCreateAPI(d))
+	r.Patch("/connectors/{id}/apis/{apiId}", handleUpdateAPI(d))
 	r.Put("/connectors/{id}/apis/{apiId}/credentials", handlePutAPICredentials(d))
 
 	r.Get("/connectors/{id}/tools", handleListTools(d))
@@ -52,6 +58,44 @@ func handleListConnectors(d Deps) http.HandlerFunc {
 	}
 }
 
+type moduleAPIBody struct {
+	Name        string                            `json:"name"`
+	EngineType  models.EngineType                 `json:"engineType"`
+	BaseURL     string                            `json:"baseUrl"`
+	AuthType    models.AuthType                   `json:"authType"`
+	SpecURL     string                            `json:"specUrl"`
+	Credentials *controlplane.PutCredentialsInput `json:"credentials"`
+}
+
+type moduleBody struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	APIs        []moduleAPIBody `json:"apis"`
+}
+
+func createConnectorModule(ctx context.Context, d Deps, orgID, connectorID int64, in moduleBody) (map[string]any, error) {
+	group, err := d.Groups.Create(ctx, orgID, controlplane.CreateGroupInput{Name: in.Name, Description: in.Description})
+	if err != nil {
+		return nil, err
+	}
+	apis := make([]*models.ConnectorAPI, 0, len(in.APIs))
+	for _, a := range in.APIs {
+		api, err := d.APIs.Create(ctx, connectorID, controlplane.CreateAPIInput{
+			Name: a.Name, EngineType: a.EngineType, BaseURL: a.BaseURL, AuthType: a.AuthType, SpecURL: a.SpecURL, GroupID: &group.ID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if a.Credentials != nil {
+			if err := d.APIs.PutCredentials(ctx, api.ID, *a.Credentials); err != nil {
+				return nil, err
+			}
+		}
+		apis = append(apis, api)
+	}
+	return map[string]any{"module": group, "apis": apis}, nil
+}
+
 func handleCreateConnector(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -61,19 +105,32 @@ func handleCreateConnector(d Deps) http.HandlerFunc {
 			Type        models.EngineType `json:"type"`
 			BaseURL     string            `json:"baseUrl"`
 			AuthType    models.AuthType   `json:"authType"`
+			Modules     []moduleBody      `json:"modules"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
-		c, err := d.Connectors.Create(r.Context(), orgIDFromContext(r), controlplane.CreateConnectorInput{
+		orgID := orgIDFromContext(r)
+		c, err := d.Connectors.Create(r.Context(), orgID, controlplane.CreateConnectorInput{
 			Name: body.Name, Glyph: body.Glyph, Description: body.Description,
 		})
 		if err != nil {
 			handleServiceError(w, err)
 			return
 		}
-		if body.BaseURL != "" {
+
+		modules := []map[string]any{}
+		if len(body.Modules) > 0 {
+			for _, m := range body.Modules {
+				result, err := createConnectorModule(r.Context(), d, orgID, c.ID, m)
+				if err != nil {
+					handleServiceError(w, err)
+					return
+				}
+				modules = append(modules, result)
+			}
+		} else if body.BaseURL != "" {
 			if _, err := d.APIs.Create(r.Context(), c.ID, controlplane.CreateAPIInput{
 				Name: body.Name, EngineType: body.Type, BaseURL: body.BaseURL, AuthType: body.AuthType,
 			}); err != nil {
@@ -81,12 +138,63 @@ func handleCreateConnector(d Deps) http.HandlerFunc {
 				return
 			}
 		}
-		c, err = d.Connectors.Get(r.Context(), orgIDFromContext(r), c.ID)
+
+		c, err = d.Connectors.Get(r.Context(), orgID, c.ID)
 		if err != nil {
 			handleServiceError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, c)
+		writeJSON(w, http.StatusCreated, map[string]any{"connector": c, "modules": modules})
+	}
+}
+
+func handleListConnectorModules(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := intIDParam(w, r, "id")
+		if !ok {
+			return
+		}
+		orgID := orgIDFromContext(r)
+		groupIDs, err := d.Groups.GroupsForConnector(r.Context(), id)
+		if err != nil {
+			handleServiceError(w, err)
+			return
+		}
+		out := make([]map[string]any, 0, len(groupIDs))
+		for _, gid := range groupIDs {
+			group, err := d.Groups.Get(r.Context(), orgID, gid)
+			if err != nil {
+				handleServiceError(w, err)
+				return
+			}
+			apis, err := d.APIs.ListByGroup(r.Context(), id, gid)
+			if err != nil {
+				handleServiceError(w, err)
+				return
+			}
+			out = append(out, map[string]any{"module": group, "apis": apis})
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func handleCreateConnectorModule(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := intIDParam(w, r, "id")
+		if !ok {
+			return
+		}
+		var body moduleBody
+		if err := decodeJSON(r, &body); err != nil {
+			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+		result, err := createConnectorModule(r.Context(), d, orgIDFromContext(r), id, body)
+		if err != nil {
+			handleServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
 	}
 }
 
@@ -123,6 +231,28 @@ func handleUpdateConnector(d Deps) http.HandlerFunc {
 		c, err := d.Connectors.Update(r.Context(), orgIDFromContext(r), id, controlplane.UpdateConnectorInput{
 			Name: body.Name, Description: body.Description, Status: body.Status,
 		})
+		if err != nil {
+			handleServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, c)
+	}
+}
+
+func handleToggleConnector(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Active bool `json:"active"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+		id, ok := intIDParam(w, r, "id")
+		if !ok {
+			return
+		}
+		c, err := d.Connectors.SetActive(r.Context(), orgIDFromContext(r), id, body.Active)
 		if err != nil {
 			handleServiceError(w, err)
 			return
@@ -285,6 +415,7 @@ func handleCreateAPI(d Deps) http.HandlerFunc {
 			BaseURL    string            `json:"baseUrl"`
 			AuthType   models.AuthType   `json:"authType"`
 			SpecURL    string            `json:"specUrl"`
+			GroupID    *int64            `json:"groupId"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
@@ -296,12 +427,41 @@ func handleCreateAPI(d Deps) http.HandlerFunc {
 		}
 		api, err := d.APIs.Create(r.Context(), id, controlplane.CreateAPIInput{
 			Name: body.Name, EngineType: body.EngineType, BaseURL: body.BaseURL, AuthType: body.AuthType, SpecURL: body.SpecURL,
+			GroupID: body.GroupID,
 		})
 		if err != nil {
 			handleServiceError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, api)
+	}
+}
+
+func handleUpdateAPI(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name     *string          `json:"name"`
+			BaseURL  *string          `json:"baseUrl"`
+			AuthType *models.AuthType `json:"authType"`
+			IsActive *bool            `json:"isActive"`
+			GroupID  nullableID       `json:"groupId"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+		apiID, ok := intIDParam(w, r, "apiId")
+		if !ok {
+			return
+		}
+		api, err := d.APIs.Update(r.Context(), apiID, controlplane.UpdateAPIInput{
+			Name: body.Name, BaseURL: body.BaseURL, AuthType: body.AuthType, IsActive: body.IsActive, GroupID: body.GroupID.ptr(),
+		})
+		if err != nil {
+			handleServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, api)
 	}
 }
 
@@ -381,6 +541,9 @@ func handleCreateTool(d Deps) http.HandlerFunc {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
+		if body.GroupID == nil {
+			body.GroupID = api.GroupID
+		}
 		tool, err := d.Tools.Create(r.Context(), apiID, api.EngineType, body)
 		if err != nil {
 			handleServiceError(w, err)
@@ -407,7 +570,19 @@ func handleGetTool(d Deps) http.HandlerFunc {
 
 func handleUpdateTool(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var body controlplane.UpdateToolInput
+		var body struct {
+			Name            *string            `json:"name"`
+			Method          *models.HTTPMethod `json:"method"`
+			Path            *string            `json:"path"`
+			Description     *string            `json:"description"`
+			Parameters      map[string]any     `json:"parameters"`
+			EndpointMapping map[string]any     `json:"endpointMapping"`
+			ResponseMapping map[string]any     `json:"responseMapping"`
+			OutputSchema    map[string]any     `json:"outputSchema"`
+			Cached          *bool              `json:"cached"`
+			CacheTTLSeconds *int               `json:"cacheTtlSeconds"`
+			GroupID         nullableID         `json:"groupId"`
+		}
 		if err := decodeJSON(r, &body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
 			return
@@ -416,7 +591,12 @@ func handleUpdateTool(d Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		tool, err := d.Tools.Update(r.Context(), toolID, body)
+		tool, err := d.Tools.Update(r.Context(), toolID, controlplane.UpdateToolInput{
+			Name: body.Name, Method: body.Method, Path: body.Path, Description: body.Description,
+			Parameters: body.Parameters, EndpointMapping: body.EndpointMapping, ResponseMapping: body.ResponseMapping,
+			OutputSchema: body.OutputSchema, Cached: body.Cached, CacheTTLSeconds: body.CacheTTLSeconds,
+			GroupID: body.GroupID.ptr(),
+		})
 		if err != nil {
 			handleServiceError(w, err)
 			return
