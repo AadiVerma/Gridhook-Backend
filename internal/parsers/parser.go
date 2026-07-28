@@ -30,10 +30,11 @@ type Registry struct {
 func NewRegistry() *Registry {
 	return &Registry{
 		parsers: map[string]Parser{
-			"openapi": &OpenAPIParser{},
-			"wsdl":    &WSDLParser{},
-			"postman": &PostmanParser{},
-			"curl":    &CurlParser{},
+			"openapi":     &OpenAPIParser{},
+			"wsdl":        &WSDLParser{},
+			"postman":     &PostmanParser{},
+			"curl":        &CurlParser{},
+			"graphql-sdl": &GraphQLSDLParser{},
 		},
 	}
 }
