@@ -62,6 +62,8 @@ type Security struct {
 	KMSKeyID string
 
 	InternalToken string
+
+	PublicIDKey string
 }
 
 type MCP struct {
@@ -122,6 +124,7 @@ func Load() (Config, error) {
 			DataKey:       stringVar("KMS_DATA_KEY", ""),
 			KMSKeyID:      stringVar("KMS_KEY_ID", ""),
 			InternalToken: stringVar("INTERNAL_TOKEN", ""),
+			PublicIDKey:   stringVar("PUBLIC_ID_KEY", ""),
 		},
 		MCP: MCP{
 			PublicBaseURL: stringVar("MCP_PUBLIC_BASE_URL", "https://gw.gridhook.dev/mcp"),
@@ -171,6 +174,10 @@ func (c Config) Validate() error {
 
 	if c.Env == EnvProduction && c.Security.DataKey == "" {
 		problems = append(problems, "KMS_DATA_KEY is required when APP_ENV=production")
+	}
+
+	if c.Env == EnvProduction && c.Security.PublicIDKey == "" {
+		problems = append(problems, "PUBLIC_ID_KEY is required when APP_ENV=production")
 	}
 
 	if c.HTTP.Addr == "" {

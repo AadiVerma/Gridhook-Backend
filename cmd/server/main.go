@@ -20,6 +20,7 @@ import (
 	"gridhook.dev/connector-backend/internal/dispatcher"
 	"gridhook.dev/connector-backend/internal/engines"
 	"gridhook.dev/connector-backend/internal/httpx"
+	"gridhook.dev/connector-backend/internal/idcodec"
 	"gridhook.dev/connector-backend/internal/identity"
 	"gridhook.dev/connector-backend/internal/observability"
 	"gridhook.dev/connector-backend/internal/parsers"
@@ -73,6 +74,11 @@ func run() error {
 		return err
 	}
 
+	publicIDs, err := newIDCodec(cfg, logger)
+	if err != nil {
+		return err
+	}
+
 	sessions := identity.NewSessionService(database.DB, cfg.Session.TTL)
 	authSvc := identity.NewAuthService(database.DB, sessions)
 	users := identity.NewUserService(database.DB)
@@ -109,6 +115,7 @@ func run() error {
 		Dispatcher:    dispatch,
 		Parsers:       parsers.NewRegistry(),
 		Upstream:      upstream,
+		IDCodec:       publicIDs,
 		Ready:         database.Ping,
 	})
 
@@ -185,4 +192,16 @@ func newSealer(cfg config.Config, logger *slog.Logger) (secrets.Sealer, error) {
 	logger.Warn("server: KMS_DATA_KEY not set — using an insecure development-only key; " +
 		"credentials sealed with it are readable by anyone with the source")
 	return secrets.NewAESSealer(secrets.DeriveKey("gridhook-dev-only-key-do-not-use-in-prod"))
+}
+
+func newIDCodec(cfg config.Config, logger *slog.Logger) (*idcodec.Codec, error) {
+	if cfg.Security.PublicIDKey != "" {
+		return idcodec.New(cfg.Security.PublicIDKey)
+	}
+	if cfg.IsProduction() {
+		return nil, fmt.Errorf("server: PUBLIC_ID_KEY is required in production")
+	}
+	logger.Warn("server: PUBLIC_ID_KEY not set — using a development-only key; " +
+		"public identifiers are forgeable by anyone with the source")
+	return idcodec.New("gridhook-dev-only-public-id-key")
 }

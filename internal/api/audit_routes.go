@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"gridhook.dev/connector-backend/internal/audit"
+	"gridhook.dev/connector-backend/internal/idcodec"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
@@ -115,7 +116,7 @@ func handleExportAuditLogs(d Deps) http.HandlerFunc {
 				return
 			}
 			for _, inv := range batch {
-				if err := cw.Write(invocationCSVRow(inv)); err != nil {
+				if err := cw.Write(invocationCSVRow(d.IDCodec, inv)); err != nil {
 					d.Logger.ErrorContext(r.Context(), "audit export: write row", errAttr(err))
 					return
 				}
@@ -132,13 +133,13 @@ func handleExportAuditLogs(d Deps) http.HandlerFunc {
 	}
 }
 
-func invocationCSVRow(inv *models.ToolInvocation) []string {
+func invocationCSVRow(codec *idcodec.Codec, inv *models.ToolInvocation) []string {
 	return []string{
-		strconv.FormatInt(inv.ID, 10),
+		codec.Encode(inv.ID),
 		inv.CreatedAt.Format(time.RFC3339),
-		strconv.FormatInt(inv.ToolID, 10),
-		strconv.FormatInt(inv.ConnectorID, 10),
-		formatOptionalID(inv.MCPServerID),
+		codec.Encode(inv.ToolID),
+		codec.Encode(inv.ConnectorID),
+		codec.Encode(inv.MCPServerID),
 		string(inv.Status),
 		strconv.Itoa(inv.HTTPCode),
 		strconv.Itoa(inv.DurationMs),

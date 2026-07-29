@@ -22,9 +22,6 @@ const (
 type ToolGroupKind string
 
 const (
-	// GroupManual is the only kind the application can produce. The
-	// tool_group_kind enum still carries 'synced', but the module-sync feature
-	// it belonged to was removed in migration 0004 — see that file.
 	GroupManual ToolGroupKind = "manual"
 )
 

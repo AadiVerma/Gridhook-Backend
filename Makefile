@@ -60,10 +60,6 @@ fmt: tools ## Format the tree
 
 check: vet lint test-race ## Run vet, lint and race tests
 
-# Migrations are tracked in a schema_migrations table, so this is safe to run
-# against a database that is already partly migrated. The previous version
-# re-ran every file unconditionally and died on 0001 with "relation already
-# exists" the moment the database was not empty.
 migrate: ## Apply any migrations this database has not seen (requires DATABASE_URL)
 	@test -n "$$DATABASE_URL" || { echo "DATABASE_URL is not set"; exit 1; }
 	@psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
@@ -79,15 +75,6 @@ migrate: ## Apply any migrations this database has not seen (requires DATABASE_U
 	done
 	@echo "migrations up to date"
 
-# For a database created before migration tracking existed: record migrations
-# as applied without running them.
-#
-# UPTO is required, and deliberately so. Baselining everything would also mark
-# migrations this database has NOT run — silently skipping them forever. Pass
-# the numeric prefix of the last migration already reflected in the schema:
-#
-#   make migrate-baseline UPTO=0003
-#
 migrate-baseline: ## Mark migrations up to UPTO=NNNN as applied without running them
 	@test -n "$$DATABASE_URL" || { echo "DATABASE_URL is not set"; exit 1; }
 	@test -n "$(UPTO)" || { echo "UPTO is required, e.g. make migrate-baseline UPTO=0003"; exit 1; }

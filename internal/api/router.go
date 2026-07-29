@@ -13,6 +13,7 @@ import (
 	"gridhook.dev/connector-backend/internal/controlplane"
 	"gridhook.dev/connector-backend/internal/dispatcher"
 	"gridhook.dev/connector-backend/internal/httpx"
+	"gridhook.dev/connector-backend/internal/idcodec"
 	"gridhook.dev/connector-backend/internal/identity"
 	"gridhook.dev/connector-backend/internal/observability"
 	"gridhook.dev/connector-backend/internal/parsers"
@@ -43,6 +44,8 @@ type Deps struct {
 
 	Upstream *httpx.Client
 
+	IDCodec *idcodec.Codec
+
 	Ready func(ctx context.Context) error
 }
 
@@ -70,6 +73,9 @@ func NewRouter(d Deps) http.Handler {
 	r.Post("/internal/audit-logs", handleInternalAuditIngest(d))
 
 	r.Route("/api/v1", func(r chi.Router) {
+
+		r.Use(TranslateIDs(d.IDCodec, d.Logger))
+
 		registerAuthRoutes(r, d)
 
 		r.Group(func(r chi.Router) {

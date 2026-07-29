@@ -130,13 +130,6 @@ func intQueryParam(w http.ResponseWriter, r *http.Request, name string) (int64, 
 	return v, true
 }
 
-func formatOptionalID(id int64) string {
-	if id == 0 {
-		return ""
-	}
-	return strconv.FormatInt(id, 10)
-}
-
 func orgIDFromContext(r *http.Request) int64 {
 	user, ok := identity.UserFromContext(r.Context())
 	if !ok {
