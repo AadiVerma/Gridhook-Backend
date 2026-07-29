@@ -44,6 +44,9 @@ func (e *GraphQLEngine) Execute(ctx context.Context, api *models.ConnectorAPI, t
 		return nil, fmt.Errorf("engines: graphql: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range staticHeadersFrom(tool.EndpointMapping) {
+		req.Header.Set(k, v)
+	}
 	for k, v := range creds.Headers {
 		req.Header.Set(k, v)
 	}

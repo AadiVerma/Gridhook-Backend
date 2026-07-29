@@ -57,8 +57,23 @@ func sdlFieldToDraftTool(opType string, field *ast.FieldDefinition, schema *ast.
 		EndpointMapping: map[string]any{
 			"operationName": field.Name,
 			"query":         sdlBuildQuery(opType, field, schema),
+			"returnType":    field.Type.String(),
+			"arguments":     sdlArgsToStructured(field.Arguments, schema),
 		},
 	}
+}
+
+func sdlArgsToStructured(args ast.ArgumentDefinitionList, schema *ast.Schema) []any {
+	out := make([]any, 0, len(args))
+	for _, arg := range args {
+		out = append(out, map[string]any{
+			"name":        arg.Name,
+			"graphqlType": arg.Type.String(),
+			"jsonType":    sdlTypeToJSONSchema(arg.Type, schema, 0)["type"],
+			"required":    arg.Type.NonNull,
+		})
+	}
+	return out
 }
 
 func sdlArgsToJSONSchema(args ast.ArgumentDefinitionList, schema *ast.Schema) map[string]any {
@@ -263,8 +278,23 @@ func introspectionFieldToDraftTool(opType string, field introspectionField, type
 		EndpointMapping: map[string]any{
 			"operationName": field.Name,
 			"query":         introspectionBuildQuery(opType, field, types),
+			"returnType":    introspectionTypeString(field.Type),
+			"arguments":     introspectionArgsToStructured(field.Args, types),
 		},
 	}
+}
+
+func introspectionArgsToStructured(args []introspectionInputValue, types map[string]introspectionType) []any {
+	out := make([]any, 0, len(args))
+	for _, arg := range args {
+		out = append(out, map[string]any{
+			"name":        arg.Name,
+			"graphqlType": introspectionTypeString(arg.Type),
+			"jsonType":    introspectionTypeToJSONSchema(arg.Type, types, 0)["type"],
+			"required":    arg.Type.Kind == "NON_NULL",
+		})
+	}
+	return out
 }
 
 func introspectionArgsToJSONSchema(args []introspectionInputValue, types map[string]introspectionType) map[string]any {

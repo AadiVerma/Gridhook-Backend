@@ -12,6 +12,7 @@ import (
 )
 
 var ErrNotFound = errors.New("controlplane: not found")
+var ErrValidation = errors.New("controlplane: validation failed")
 
 type ConnectorService struct {
 	db *gorm.DB

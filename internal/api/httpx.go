@@ -61,6 +61,8 @@ func handleServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, controlplane.ErrNotFound), errors.Is(err, identity.ErrUserNotFound):
 		apiError(w, http.StatusNotFound, "not_found", "resource not found")
+	case errors.Is(err, controlplane.ErrValidation):
+		apiError(w, http.StatusBadRequest, "validation_failed", err.Error())
 	default:
 		apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 	}

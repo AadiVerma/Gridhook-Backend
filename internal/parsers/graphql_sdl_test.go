@@ -83,6 +83,17 @@ func TestGraphQLSDLParser_Parse_SDL(t *testing.T) {
 	if strings.Contains(query, "posts") {
 		t.Errorf("getUser query should not select the object-typed posts field: %s", query)
 	}
+	if getUser.EndpointMapping["returnType"] != "User" {
+		t.Errorf("getUser returnType = %v, want User", getUser.EndpointMapping["returnType"])
+	}
+	guArgs, _ := getUser.EndpointMapping["arguments"].([]any)
+	if len(guArgs) != 1 {
+		t.Fatalf("got %d structured arguments, want 1: %#v", len(guArgs), guArgs)
+	}
+	guArg, _ := guArgs[0].(map[string]any)
+	if guArg["name"] != "id" || guArg["graphqlType"] != "ID!" || guArg["jsonType"] != "string" || guArg["required"] != true {
+		t.Errorf("getUser structured argument = %#v", guArg)
+	}
 
 	createUser, ok := findTool(result.Tools, "createUser")
 	if !ok {
@@ -170,6 +181,18 @@ func TestGraphQLSDLParser_Parse_Introspection(t *testing.T) {
 		if !strings.Contains(query, want) {
 			t.Errorf("query missing scalar selection %q: %s", want, query)
 		}
+	}
+
+	if tool.EndpointMapping["returnType"] != "Item" {
+		t.Errorf("returnType = %v, want Item", tool.EndpointMapping["returnType"])
+	}
+	args, _ := tool.EndpointMapping["arguments"].([]any)
+	if len(args) != 1 {
+		t.Fatalf("got %d structured arguments, want 1: %#v", len(args), args)
+	}
+	arg, _ := args[0].(map[string]any)
+	if arg["name"] != "id" || arg["graphqlType"] != "ID!" || arg["jsonType"] != "string" || arg["required"] != true {
+		t.Errorf("structured argument = %#v", arg)
 	}
 }
 

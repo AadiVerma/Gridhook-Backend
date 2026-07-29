@@ -115,6 +115,25 @@ func TestWSDLParser_Parse(t *testing.T) {
 	if !strings.Contains(envelope, "tns:GetWeatherRequest") {
 		t.Errorf("envelopeTemplate missing request element: %s", envelope)
 	}
+
+	if tool.EndpointMapping["elementName"] != "GetWeatherRequest" {
+		t.Errorf("elementName = %v, want GetWeatherRequest", tool.EndpointMapping["elementName"])
+	}
+	if tool.EndpointMapping["targetNamespace"] != "http://example.com/weather" {
+		t.Errorf("targetNamespace = %v", tool.EndpointMapping["targetNamespace"])
+	}
+	structuredFields, _ := tool.EndpointMapping["fields"].([]any)
+	if len(structuredFields) != 2 {
+		t.Fatalf("got %d structured fields, want 2: %#v", len(structuredFields), structuredFields)
+	}
+	cityField, _ := structuredFields[0].(map[string]any)
+	if cityField["name"] != "city" || cityField["xsdType"] != "string" || cityField["jsonType"] != "string" || cityField["repeated"] != false {
+		t.Errorf("structured city field = %#v", cityField)
+	}
+	daysField, _ := structuredFields[1].(map[string]any)
+	if daysField["name"] != "days" || daysField["xsdType"] != "int" || daysField["jsonType"] != "integer" || daysField["repeated"] != false {
+		t.Errorf("structured days field = %#v", daysField)
+	}
 }
 
 func TestWSDLParser_Parse_InvalidDocument(t *testing.T) {

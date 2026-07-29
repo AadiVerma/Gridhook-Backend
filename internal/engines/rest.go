@@ -109,18 +109,12 @@ type restMapping struct {
 }
 
 func parseRestMapping(raw map[string]any) restMapping {
-	m := restMapping{
+	return restMapping{
 		pathParams:    toSet(raw["pathParams"]),
 		queryParams:   toSet(raw["queryParams"]),
 		bodyParams:    toSet(raw["bodyParams"]),
-		staticHeaders: map[string]string{},
+		staticHeaders: staticHeadersFrom(raw),
 	}
-	if headers, ok := raw["headers"].(map[string]any); ok {
-		for k, v := range headers {
-			m.staticHeaders[k] = fmt.Sprint(v)
-		}
-	}
-	return m
 }
 
 func toSet(v any) map[string]bool {

@@ -8,6 +8,19 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
+// staticHeadersFrom reads an EndpointMapping's "headers" entry (a flat
+// map[string]any) into request headers every engine applies the same way:
+// after its own protocol defaults, before credential headers.
+func staticHeadersFrom(mapping map[string]any) map[string]string {
+	out := map[string]string{}
+	if headers, ok := mapping["headers"].(map[string]any); ok {
+		for k, v := range headers {
+			out[k] = fmt.Sprint(v)
+		}
+	}
+	return out
+}
+
 type Result struct {
 	StatusCode int
 	Headers    map[string]string

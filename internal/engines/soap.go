@@ -30,12 +30,12 @@ func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 
 	envelope := template
 	for key, val := range input {
-		placeholder := "{{" + key + "}}"
 		var escaped strings.Builder
 		if err := xml.EscapeText(&escaped, []byte(fmt.Sprint(val))); err != nil {
 			return nil, fmt.Errorf("engines: soap: escape param %q: %w", key, err)
 		}
-		envelope = strings.ReplaceAll(envelope, placeholder, escaped.String())
+		envelope = strings.ReplaceAll(envelope, "{{"+key+"}}", escaped.String())
+		envelope = strings.ReplaceAll(envelope, "{"+key+"}", escaped.String())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.BaseURL, strings.NewReader(envelope))
@@ -45,6 +45,9 @@ func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 	req.Header.Set("Content-Type", "text/xml; charset=utf-8")
 	if soapAction != "" {
 		req.Header.Set("SOAPAction", soapAction)
+	}
+	for k, v := range staticHeadersFrom(tool.EndpointMapping) {
+		req.Header.Set(k, v)
 	}
 	for k, v := range creds.Headers {
 		req.Header.Set(k, v)

@@ -78,6 +78,9 @@ func (p *WSDLParser) Parse(raw []byte) (*ParseResult, error) {
 				EndpointMapping: map[string]any{
 					"envelopeTemplate": buildEnvelopeTemplate(targetNS, fields.elementName, fields.list),
 					"soapAction":       soapActions[op.Name],
+					"targetNamespace":  targetNS,
+					"elementName":      fields.elementName,
+					"fields":           fieldsToStructured(fields.list),
 				},
 			})
 		}
@@ -260,6 +263,19 @@ func fieldsToJSONSchema(f resolvedFields) map[string]any {
 		"properties": properties,
 		"required":   required,
 	}
+}
+
+func fieldsToStructured(fields []field) []any {
+	out := make([]any, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, map[string]any{
+			"name":     f.name,
+			"xsdType":  f.xsdType,
+			"jsonType": xsdTypeToJSONSchema(f.xsdType)["type"],
+			"repeated": f.repeated,
+		})
+	}
+	return out
 }
 
 func buildEnvelopeTemplate(targetNS, elementName string, fields []field) string {

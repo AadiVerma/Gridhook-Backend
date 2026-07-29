@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
+	"regexp"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -36,6 +39,11 @@ type CreateToolInput struct {
 }
 
 func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineType models.EngineType, in CreateToolInput) (*models.MCPTool, error) {
+	parameters, endpointMapping, err := resolveToolConfig(engineType, orEmpty(in.Parameters), orEmpty(in.EndpointMapping))
+	if err != nil {
+		return nil, err
+	}
+
 	method := in.Method
 	if method == "" && engineType == models.EngineSOAP {
 		method = models.MethodPOST
@@ -47,8 +55,8 @@ func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineTy
 		Method:            method,
 		Path:              in.Path,
 		Description:       in.Description,
-		Parameters:        orEmpty(in.Parameters),
-		EndpointMapping:   orEmpty(in.EndpointMapping),
+		Parameters:        parameters,
+		EndpointMapping:   endpointMapping,
 		ResponseMapping:   orEmpty(in.ResponseMapping),
 		OutputSchema:      orEmpty(in.OutputSchema),
 		Cached:            in.Cached,
@@ -62,6 +70,153 @@ func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineTy
 		return nil, fmt.Errorf("controlplane: create tool: %w", err)
 	}
 	return t, nil
+}
+
+// resolveToolConfig is the one place a tool's parameters/endpointMapping get
+// settled before they're persisted. It never rejects a caller for handing
+// over native protocol content instead of a pre-shaped JSON Schema — that
+// would just push the JSON conversion work back onto the user, which is the
+// engine's job. Instead it migrates recognizable native input (a SOAP
+// envelope pasted into parameters.body, a GraphQL query pasted into
+// parameters.query) into endpointMapping, derives a best-effort JSON Schema
+// from whatever placeholders/variables it finds, and only errors when there
+// is truly nothing usable to build a request from.
+func resolveToolConfig(engineType models.EngineType, parameters, endpointMapping map[string]any) (map[string]any, map[string]any, error) {
+	parameters, endpointMapping = migrateNativeInput(engineType, parameters, endpointMapping)
+
+	if _, hasType := parameters["type"]; !hasType {
+		parameters = map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+
+	switch engineType {
+	case models.EngineSOAP:
+		template, _ := endpointMapping["envelopeTemplate"].(string)
+		if strings.TrimSpace(template) == "" {
+			return nil, nil, fmt.Errorf("%w: SOAP tools need a SOAP envelope to call — set endpointMapping.envelopeTemplate, or put it in parameters.body and it will be migrated automatically", ErrValidation)
+		}
+	case models.EngineGraphQL:
+		query, _ := endpointMapping["query"].(string)
+		if strings.TrimSpace(query) == "" {
+			return nil, nil, fmt.Errorf("%w: GraphQL tools need a query to call — set endpointMapping.query, or put it in parameters.query and it will be migrated automatically", ErrValidation)
+		}
+	}
+	return parameters, endpointMapping, nil
+}
+
+var placeholderPattern = regexp.MustCompile(`\{\{?([A-Za-z_][A-Za-z0-9_]*)\}\}?`)
+
+// migrateNativeInput relocates a raw protocol payload the caller put under
+// "parameters" (because there was nowhere else obvious to put it) into
+// endpointMapping, where the engines actually read it from. Existing,
+// already-correct endpointMapping content is never overwritten.
+func migrateNativeInput(engineType models.EngineType, parameters, endpointMapping map[string]any) (map[string]any, map[string]any) {
+	original := parameters
+	endpointMapping = cloneMap(endpointMapping)
+
+	switch engineType {
+	case models.EngineSOAP:
+		if _, ok := endpointMapping["headers"]; !ok {
+			if headers, ok := original["headers"].(map[string]any); ok {
+				endpointMapping["headers"] = flattenHeaderValues(headers)
+			}
+		}
+		if template, _ := endpointMapping["envelopeTemplate"].(string); strings.TrimSpace(template) == "" {
+			if body, ok := original["body"].(string); ok && strings.TrimSpace(body) != "" {
+				endpointMapping["envelopeTemplate"] = body
+				parameters = schemaFromPlaceholders(extractPlaceholders(body))
+			}
+		}
+	case models.EngineGraphQL:
+		if query, _ := endpointMapping["query"].(string); strings.TrimSpace(query) == "" {
+			if q, ok := original["query"].(string); ok && strings.TrimSpace(q) != "" {
+				endpointMapping["query"] = q
+				if opName, ok := original["operationName"].(string); ok {
+					endpointMapping["operationName"] = opName
+				}
+				if vars, ok := original["variables"].(map[string]any); ok {
+					parameters = schemaFromExampleValues(vars)
+				} else {
+					parameters = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+			}
+		}
+	}
+	return parameters, endpointMapping
+}
+
+func extractPlaceholders(body string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, m := range placeholderPattern.FindAllStringSubmatch(body, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
+
+func schemaFromPlaceholders(names []string) map[string]any {
+	properties := map[string]any{}
+	required := make([]any, 0, len(names))
+	for _, name := range names {
+		properties[name] = map[string]any{"type": "string"}
+		required = append(required, name)
+	}
+	return map[string]any{"type": "object", "properties": properties, "required": required}
+}
+
+func schemaFromExampleValues(vars map[string]any) map[string]any {
+	properties := map[string]any{}
+	for k, v := range vars {
+		properties[k] = map[string]any{"type": jsonTypeOfValue(v)}
+	}
+	return map[string]any{"type": "object", "properties": properties}
+}
+
+func jsonTypeOfValue(v any) string {
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case float64:
+		return "number"
+	default:
+		return "string"
+	}
+}
+
+// flattenHeaderValues coerces whatever shape a caller used to describe
+// headers into a flat name->value map, since that's the only shape the
+// engines' staticHeadersFrom reads. Plain string values pass through; a
+// schema-like descriptor (e.g. {"type":"string","description":"text/xml"})
+// contributes whichever of its fields actually looks like the header's value.
+func flattenHeaderValues(headers map[string]any) map[string]any {
+	out := make(map[string]any, len(headers))
+	for name, v := range headers {
+		switch val := v.(type) {
+		case string:
+			out[name] = val
+		case map[string]any:
+			for _, key := range []string{"value", "default", "example", "description"} {
+				if s, ok := val[key].(string); ok {
+					out[name] = s
+					break
+				}
+			}
+			if _, ok := out[name]; !ok {
+				out[name] = fmt.Sprint(v)
+			}
+		default:
+			out[name] = fmt.Sprint(v)
+		}
+	}
+	return out
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	maps.Copy(out, m)
+	return out
 }
 
 func (s *ToolService) BulkCreate(ctx context.Context, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool) ([]*models.MCPTool, error) {
@@ -119,7 +274,29 @@ type UpdateToolInput struct {
 }
 
 func (s *ToolService) Update(ctx context.Context, id int64, in UpdateToolInput) (*models.MCPTool, error) {
+	existing, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	effectiveParameters := map[string]any(existing.Parameters)
+	if in.Parameters != nil {
+		effectiveParameters = orEmpty(in.Parameters)
+	}
+	effectiveEndpointMapping := map[string]any(existing.EndpointMapping)
+	if in.EndpointMapping != nil {
+		effectiveEndpointMapping = orEmpty(in.EndpointMapping)
+	}
+
 	updates := map[string]any{}
+	if in.Parameters != nil || in.EndpointMapping != nil {
+		resolvedParameters, resolvedEndpointMapping, err := resolveToolConfig(existing.EngineType, effectiveParameters, effectiveEndpointMapping)
+		if err != nil {
+			return nil, err
+		}
+		updates["parameters"] = resolvedParameters
+		updates["endpoint_mapping"] = resolvedEndpointMapping
+	}
 	if in.Name != nil {
 		updates["name"] = *in.Name
 	}
@@ -131,12 +308,6 @@ func (s *ToolService) Update(ctx context.Context, id int64, in UpdateToolInput) 
 	}
 	if in.Description != nil {
 		updates["description"] = *in.Description
-	}
-	if in.Parameters != nil {
-		updates["parameters"] = orEmpty(in.Parameters)
-	}
-	if in.EndpointMapping != nil {
-		updates["endpoint_mapping"] = orEmpty(in.EndpointMapping)
 	}
 	if in.ResponseMapping != nil {
 		updates["response_mapping"] = orEmpty(in.ResponseMapping)
