@@ -3,9 +3,13 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"gridhook.dev/connector-backend/internal/auth/schemes"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
@@ -17,9 +21,11 @@ type Broker struct {
 	store   CredentialsStore
 	cache   TokenCache
 	schemes map[models.AuthType]schemes.Scheme
+
+	inflight singleflight.Group
 }
 
-func NewBroker(store CredentialsStore, cache TokenCache) *Broker {
+func NewBroker(store CredentialsStore, cache TokenCache, httpClient *httpx.Client) *Broker {
 	return &Broker{
 		store: store,
 		cache: cache,
@@ -27,11 +33,15 @@ func NewBroker(store CredentialsStore, cache TokenCache) *Broker {
 			models.AuthBearer:     schemes.BearerScheme{},
 			models.AuthAPIKey:     schemes.APIKeyScheme{},
 			models.AuthBasic:      schemes.BasicScheme{},
-			models.AuthOAuth2:     schemes.NewOAuth2Scheme(),
+			models.AuthOAuth2:     schemes.NewOAuth2Scheme(httpClient),
 			models.AuthLoginToken: schemes.BearerScheme{},
 		},
 	}
 }
+
+const defaultCacheTTL = 5 * time.Minute
+
+const refreshMargin = time.Minute
 
 func (b *Broker) Resolve(ctx context.Context, api *models.ConnectorAPI) (schemes.Credentials, error) {
 	if api.AuthType == models.AuthNone {
@@ -47,23 +57,45 @@ func (b *Broker) Resolve(ctx context.Context, api *models.ConnectorAPI) (schemes
 		return schemes.Credentials{}, fmt.Errorf("auth: no scheme registered for auth type %q", api.AuthType)
 	}
 
-	credsRow, err := b.store.LoadCredentials(ctx, api.ID)
-	if err != nil {
-		return schemes.Credentials{}, fmt.Errorf("auth: load credentials for connector_api %d: %w", api.ID, err)
-	}
+	key := strconv.FormatInt(api.ID, 10)
+	resolved, err, _ := b.inflight.Do(key, func() (any, error) {
 
-	resolved, err := scheme.Resolve(ctx, credsRow)
+		if cached, ok := b.cache.Get(ctx, api.ID); ok {
+			return cached, nil
+		}
+
+		credsRow, err := b.store.LoadCredentials(ctx, api.ID)
+		if err != nil {
+			return schemes.Credentials{}, fmt.Errorf("auth: load credentials for connector_api %d: %w", api.ID, err)
+		}
+
+		creds, err := scheme.Resolve(ctx, credsRow)
+		if err != nil {
+			return schemes.Credentials{}, err
+		}
+
+		b.cache.Set(ctx, api.ID, creds, cacheTTL(creds.ExpiresInSeconds))
+		return creds, nil
+	})
 	if err != nil {
 		return schemes.Credentials{}, err
 	}
 
-	ttl := time.Duration(resolved.ExpiresInSeconds) * time.Second
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	} else if ttl > time.Minute {
-		ttl -= time.Minute
+	creds, ok := resolved.(schemes.Credentials)
+	if !ok {
+		return schemes.Credentials{}, fmt.Errorf("auth: unexpected resolution type %T", resolved)
 	}
-	b.cache.Set(ctx, api.ID, resolved, ttl)
+	return creds, nil
+}
 
-	return resolved, nil
+func cacheTTL(expiresInSeconds int) time.Duration {
+	if expiresInSeconds <= 0 {
+		return defaultCacheTTL
+	}
+	ttl := time.Duration(expiresInSeconds) * time.Second
+	if ttl > refreshMargin {
+		return ttl - refreshMargin
+	}
+
+	return ttl
 }

@@ -1,6 +1,9 @@
 # Build artifacts
 /bin/
 /dist/
+# air's live-reload scratch space
+/tmp/
+build-errors.log
 *.exe
 *.test
 

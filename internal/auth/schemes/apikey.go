@@ -11,7 +11,7 @@ type APIKeyScheme struct{}
 
 func (APIKeyScheme) Resolve(_ context.Context, creds *models.ConnectorCredentials) (Credentials, error) {
 	if creds.APIKeyValue == "" {
-		return Credentials{}, fmt.Errorf("schemes: api_key credentials missing value")
+		return Credentials{}, fmt.Errorf("%w: api_key needs api_key_value", ErrIncompleteCredentials)
 	}
 	header := creds.APIKeyHeader
 	if header == "" {

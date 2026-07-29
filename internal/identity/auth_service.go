@@ -2,8 +2,6 @@ package identity
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,12 +10,14 @@ import (
 	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/models"
+	"gridhook.dev/connector-backend/internal/slug"
 )
 
 var (
 	ErrEmailTaken         = errors.New("identity: email already registered")
 	ErrInvalidCredentials = errors.New("identity: invalid email or password")
 	ErrNotAMember         = errors.New("identity: not a member of that organization")
+	ErrInvalidEmail       = errors.New("identity: email is not valid")
 )
 
 type AuthService struct {
@@ -41,8 +41,6 @@ type AuthResult struct {
 	Session *models.Session
 }
 
-// OrgMembership summarizes one organization an email belongs to — used to
-// disambiguate Login when an email belongs to more than one.
 type OrgMembership struct {
 	MembershipID     int64             `gorm:"column:membership_id"`
 	OrganizationID   int64             `gorm:"column:organization_id"`
@@ -54,37 +52,42 @@ type OrgMembership struct {
 	CreatedAt        time.Time         `gorm:"column:created_at"`
 }
 
-// Register always creates a brand-new organization. An email that already
-// has a row in any organization is rejected outright — the only way to join
-// an existing organization is an invite link from someone already in it
-// (built later; that invite path is what will give one email rows in
-// multiple organizations, chosen between at login).
 func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResult, error) {
-	var existing int64
-	if err := s.db.WithContext(ctx).Model(&models.User{}).Where("email = ?", in.Email).Count(&existing).Error; err != nil {
-		return nil, fmt.Errorf("identity: register: check email: %w", err)
-	}
-	if existing > 0 {
-		return nil, ErrEmailTaken
+	email, err := NormalizeEmail(in.Email)
+	if err != nil {
+		return nil, err
 	}
 
 	passwordHash, err := HashPassword(in.Password)
 	if err != nil {
-		return nil, fmt.Errorf("identity: register: hash password: %w", err)
+		return nil, err
 	}
 
-	domain := emailDomain(in.Email)
+	domain := emailDomain(email)
 	orgName := in.Organization
 	if orgName == "" {
 		orgName = domain
 	}
-	slug, err := newSlug(orgName)
+	orgSlug, err := slug.MakeUnique(orgName)
 	if err != nil {
 		return nil, fmt.Errorf("identity: register: slug: %w", err)
 	}
 
 	u := &models.User{}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtext(?)::bigint)`, email).Error; err != nil {
+			return fmt.Errorf("identity: register: lock email: %w", err)
+		}
+
+		var existing int64
+		if err := tx.Model(&models.User{}).Where("email = ?", email).Count(&existing).Error; err != nil {
+			return fmt.Errorf("identity: register: check email: %w", err)
+		}
+		if existing > 0 {
+			return ErrEmailTaken
+		}
+
 		tenant := models.Tenant{Name: domain, Domain: domain}
 		if err := tx.Create(&tenant).Error; err != nil {
 			return fmt.Errorf("identity: register: create tenant: %w", err)
@@ -95,13 +98,13 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResu
 			return fmt.Errorf("identity: register: create company: %w", err)
 		}
 
-		org := models.Organization{CompanyID: company.ID, TenantID: tenant.ID, Name: orgName, Slug: slug}
+		org := models.Organization{CompanyID: company.ID, TenantID: tenant.ID, Name: orgName, Slug: orgSlug}
 		if err := tx.Create(&org).Error; err != nil {
 			return fmt.Errorf("identity: register: create organization: %w", err)
 		}
 
 		*u = models.User{
-			OrganizationID: org.ID, Email: in.Email, Name: in.Name, PasswordHash: passwordHash,
+			OrganizationID: org.ID, Email: email, Name: in.Name, PasswordHash: passwordHash,
 			Role: models.RoleOwner, Status: models.UserStatusActive,
 		}
 		if err := tx.Create(u).Error; err != nil {
@@ -120,25 +123,21 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*AuthResu
 	return &AuthResult{User: u, Session: sess}, nil
 }
 
-// Login verifies the password once, then resolves which organization to
-// sign into:
-//   - organizationID == 0 and exactly one membership: signs into it.
-//   - organizationID == 0 and multiple memberships: returns them (nil
-//     AuthResult, nil error) so the caller can ask the user to choose.
-//   - organizationID != 0: signs into that membership, or ErrNotAMember if
-//     the email isn't part of it.
-//
-// All rows sharing an email are expected to carry the same password_hash —
-// that invariant is what makes "one password, pick your org" work without a
-// separate accounts table. The invite flow (built later) must copy the
-// existing password_hash when adding someone to another organization,
-// rather than generating an independent one.
 func (s *AuthService) Login(ctx context.Context, email, password string, organizationID int64) (*AuthResult, []OrgMembership, error) {
-	memberships, err := s.membershipsForEmail(ctx, email)
+	normalized, err := NormalizeEmail(email)
+	if err != nil {
+
+		BurnPasswordComparison(password)
+		return nil, nil, ErrInvalidCredentials
+	}
+
+	memberships, err := s.membershipsForEmail(ctx, normalized)
 	if err != nil {
 		return nil, nil, fmt.Errorf("identity: login: list memberships: %w", err)
 	}
 	if len(memberships) == 0 {
+
+		BurnPasswordComparison(password)
 		return nil, nil, ErrInvalidCredentials
 	}
 
@@ -146,28 +145,18 @@ func (s *AuthService) Login(ctx context.Context, email, password string, organiz
 		PasswordHash string `gorm:"column:password_hash"`
 	}
 	if err := s.db.WithContext(ctx).Model(&models.User{}).
-		Select("password_hash").Where("email = ?", email).Take(&row).Error; err != nil {
+		Select("password_hash").Where("email = ?", normalized).Take(&row).Error; err != nil {
 		return nil, nil, fmt.Errorf("identity: login: %w", err)
 	}
 	if !VerifyPassword(row.PasswordHash, password) {
 		return nil, nil, ErrInvalidCredentials
 	}
 
-	var chosen *OrgMembership
-	switch {
-	case organizationID != 0:
-		for i := range memberships {
-			if memberships[i].OrganizationID == organizationID {
-				chosen = &memberships[i]
-				break
-			}
-		}
-		if chosen == nil {
-			return nil, nil, ErrNotAMember
-		}
-	case len(memberships) == 1:
-		chosen = &memberships[0]
-	default:
+	chosen, err := chooseMembership(memberships, organizationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if chosen == nil {
 		return nil, memberships, nil
 	}
 
@@ -178,7 +167,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string, organiz
 
 	now := time.Now()
 	u := &models.User{
-		ID: chosen.MembershipID, OrganizationID: chosen.OrganizationID, Email: email, Name: chosen.Name,
+		ID: chosen.MembershipID, OrganizationID: chosen.OrganizationID, Email: normalized, Name: chosen.Name,
 		Role: chosen.Role, Status: chosen.Status, LastActiveAt: &now, CreatedAt: chosen.CreatedAt,
 	}
 	sess, err := s.sessions.Issue(ctx, u.ID)
@@ -186,6 +175,21 @@ func (s *AuthService) Login(ctx context.Context, email, password string, organiz
 		return nil, nil, fmt.Errorf("identity: login: issue session: %w", err)
 	}
 	return &AuthResult{User: u, Session: sess}, nil, nil
+}
+
+func chooseMembership(memberships []OrgMembership, organizationID int64) (*OrgMembership, error) {
+	if organizationID != 0 {
+		for i := range memberships {
+			if memberships[i].OrganizationID == organizationID {
+				return &memberships[i], nil
+			}
+		}
+		return nil, ErrNotAMember
+	}
+	if len(memberships) == 1 {
+		return &memberships[0], nil
+	}
+	return nil, nil
 }
 
 func (s *AuthService) membershipsForEmail(ctx context.Context, email string) ([]OrgMembership, error) {
@@ -200,24 +204,19 @@ func (s *AuthService) membershipsForEmail(ctx context.Context, email string) ([]
 	return rows, err
 }
 
+func NormalizeEmail(email string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(normalized, "@")
+	if at <= 0 || at == len(normalized)-1 || strings.ContainsAny(normalized, " \t\r\n") {
+		return "", ErrInvalidEmail
+	}
+	return normalized, nil
+}
+
 func emailDomain(email string) string {
-	parts := strings.SplitN(email, "@", 2)
-	if len(parts) != 2 {
+	_, domain, found := strings.Cut(email, "@")
+	if !found {
 		return email
 	}
-	return strings.ToLower(parts[1])
-}
-
-func slugify(name string) string {
-	s := strings.ToLower(strings.TrimSpace(name))
-	s = strings.ReplaceAll(s, " ", "-")
-	return s
-}
-
-func newSlug(name string) (string, error) {
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", err
-	}
-	return slugify(name) + "-" + hex.EncodeToString(suffix), nil
+	return domain
 }

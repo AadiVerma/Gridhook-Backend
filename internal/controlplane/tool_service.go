@@ -5,13 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"maps"
-	"regexp"
-	"strings"
 
 	"gorm.io/gorm"
 
-	"gridhook.dev/connector-backend/internal/dispatcher"
 	"gridhook.dev/connector-backend/internal/models"
 	"gridhook.dev/connector-backend/internal/parsers"
 )
@@ -22,6 +18,13 @@ type ToolService struct {
 
 func NewToolService(gdb *gorm.DB) *ToolService {
 	return &ToolService{db: gdb}
+}
+
+func orgScopedTools(tx *gorm.DB, orgID int64) *gorm.DB {
+	return tx.Where(`mcp_tools.connector_api_id IN (
+		SELECT a.id FROM connector_apis a
+		JOIN connectors c ON c.id = a.connector_id
+		WHERE c.organization_id = ?)`, orgID)
 }
 
 type CreateToolInput struct {
@@ -38,7 +41,29 @@ type CreateToolInput struct {
 	GroupID         *int64
 }
 
-func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineType models.EngineType, in CreateToolInput) (*models.MCPTool, error) {
+func (s *ToolService) Create(ctx context.Context, orgID, connectorAPIID int64, engineType models.EngineType, in CreateToolInput) (*models.MCPTool, error) {
+	if err := s.assertAPIInOrg(ctx, orgID, connectorAPIID); err != nil {
+		return nil, err
+	}
+	return s.createTool(ctx, s.db.WithContext(ctx), connectorAPIID, engineType, in)
+}
+
+func (s *ToolService) assertAPIInOrg(ctx context.Context, orgID, connectorAPIID int64) error {
+	var count int64
+	err := s.db.WithContext(ctx).Model(&models.ConnectorAPI{}).
+		Where("connector_apis.id = ?", connectorAPIID).
+		Where("connector_apis.connector_id IN (SELECT id FROM connectors WHERE organization_id = ?)", orgID).
+		Count(&count).Error
+	if err != nil {
+		return fmt.Errorf("controlplane: verify connector_api ownership: %w", err)
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *ToolService) createTool(ctx context.Context, tx *gorm.DB, connectorAPIID int64, engineType models.EngineType, in CreateToolInput) (*models.MCPTool, error) {
 	parameters, endpointMapping, err := resolveToolConfig(engineType, orEmpty(in.Parameters), orEmpty(in.EndpointMapping))
 	if err != nil {
 		return nil, err
@@ -66,195 +91,65 @@ func (s *ToolService) Create(ctx context.Context, connectorAPIID int64, engineTy
 		DisplayOnFrontend: true,
 		GroupID:           in.GroupID,
 	}
-	if err := s.db.WithContext(ctx).Create(t).Error; err != nil {
+	if err := tx.WithContext(ctx).Create(t).Error; err != nil {
 		return nil, fmt.Errorf("controlplane: create tool: %w", err)
 	}
 	return t, nil
 }
 
-// resolveToolConfig is the one place a tool's parameters/endpointMapping get
-// settled before they're persisted. It never rejects a caller for handing
-// over native protocol content instead of a pre-shaped JSON Schema — that
-// would just push the JSON conversion work back onto the user, which is the
-// engine's job. Instead it migrates recognizable native input (a SOAP
-// envelope pasted into parameters.body, a GraphQL query pasted into
-// parameters.query) into endpointMapping, derives a best-effort JSON Schema
-// from whatever placeholders/variables it finds, and only errors when there
-// is truly nothing usable to build a request from.
-func resolveToolConfig(engineType models.EngineType, parameters, endpointMapping map[string]any) (map[string]any, map[string]any, error) {
-	parameters, endpointMapping = migrateNativeInput(engineType, parameters, endpointMapping)
-
-	if _, hasType := parameters["type"]; !hasType {
-		parameters = map[string]any{"type": "object", "properties": map[string]any{}}
+func (s *ToolService) BulkCreate(ctx context.Context, orgID, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool) ([]*models.MCPTool, error) {
+	if err := s.assertAPIInOrg(ctx, orgID, connectorAPIID); err != nil {
+		return nil, err
 	}
 
-	switch engineType {
-	case models.EngineSOAP:
-		template, _ := endpointMapping["envelopeTemplate"].(string)
-		if strings.TrimSpace(template) == "" {
-			return nil, nil, fmt.Errorf("%w: SOAP tools need a SOAP envelope to call — set endpointMapping.envelopeTemplate, or put it in parameters.body and it will be migrated automatically", ErrValidation)
-		}
-	case models.EngineGraphQL:
-		query, _ := endpointMapping["query"].(string)
-		if strings.TrimSpace(query) == "" {
-			return nil, nil, fmt.Errorf("%w: GraphQL tools need a query to call — set endpointMapping.query, or put it in parameters.query and it will be migrated automatically", ErrValidation)
-		}
-	}
-	return parameters, endpointMapping, nil
-}
-
-var placeholderPattern = regexp.MustCompile(`\{\{?([A-Za-z_][A-Za-z0-9_]*)\}\}?`)
-
-// migrateNativeInput relocates a raw protocol payload the caller put under
-// "parameters" (because there was nowhere else obvious to put it) into
-// endpointMapping, where the engines actually read it from. Existing,
-// already-correct endpointMapping content is never overwritten.
-func migrateNativeInput(engineType models.EngineType, parameters, endpointMapping map[string]any) (map[string]any, map[string]any) {
-	original := parameters
-	endpointMapping = cloneMap(endpointMapping)
-
-	switch engineType {
-	case models.EngineSOAP:
-		if _, ok := endpointMapping["headers"]; !ok {
-			if headers, ok := original["headers"].(map[string]any); ok {
-				endpointMapping["headers"] = flattenHeaderValues(headers)
-			}
-		}
-		if template, _ := endpointMapping["envelopeTemplate"].(string); strings.TrimSpace(template) == "" {
-			if body, ok := original["body"].(string); ok && strings.TrimSpace(body) != "" {
-				endpointMapping["envelopeTemplate"] = body
-				parameters = schemaFromPlaceholders(extractPlaceholders(body))
-			}
-		}
-	case models.EngineGraphQL:
-		if query, _ := endpointMapping["query"].(string); strings.TrimSpace(query) == "" {
-			if q, ok := original["query"].(string); ok && strings.TrimSpace(q) != "" {
-				endpointMapping["query"] = q
-				if opName, ok := original["operationName"].(string); ok {
-					endpointMapping["operationName"] = opName
-				}
-				if vars, ok := original["variables"].(map[string]any); ok {
-					parameters = schemaFromExampleValues(vars)
-				} else {
-					parameters = map[string]any{"type": "object", "properties": map[string]any{}}
-				}
-			}
-		}
-	}
-	return parameters, endpointMapping
-}
-
-func extractPlaceholders(body string) []string {
-	seen := map[string]bool{}
-	var names []string
-	for _, m := range placeholderPattern.FindAllStringSubmatch(body, -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			names = append(names, m[1])
-		}
-	}
-	return names
-}
-
-func schemaFromPlaceholders(names []string) map[string]any {
-	properties := map[string]any{}
-	required := make([]any, 0, len(names))
-	for _, name := range names {
-		properties[name] = map[string]any{"type": "string"}
-		required = append(required, name)
-	}
-	return map[string]any{"type": "object", "properties": properties, "required": required}
-}
-
-func schemaFromExampleValues(vars map[string]any) map[string]any {
-	properties := map[string]any{}
-	for k, v := range vars {
-		properties[k] = map[string]any{"type": jsonTypeOfValue(v)}
-	}
-	return map[string]any{"type": "object", "properties": properties}
-}
-
-func jsonTypeOfValue(v any) string {
-	switch v.(type) {
-	case bool:
-		return "boolean"
-	case float64:
-		return "number"
-	default:
-		return "string"
-	}
-}
-
-// flattenHeaderValues coerces whatever shape a caller used to describe
-// headers into a flat name->value map, since that's the only shape the
-// engines' staticHeadersFrom reads. Plain string values pass through; a
-// schema-like descriptor (e.g. {"type":"string","description":"text/xml"})
-// contributes whichever of its fields actually looks like the header's value.
-func flattenHeaderValues(headers map[string]any) map[string]any {
-	out := make(map[string]any, len(headers))
-	for name, v := range headers {
-		switch val := v.(type) {
-		case string:
-			out[name] = val
-		case map[string]any:
-			for _, key := range []string{"value", "default", "example", "description"} {
-				if s, ok := val[key].(string); ok {
-					out[name] = s
-					break
-				}
-			}
-			if _, ok := out[name]; !ok {
-				out[name] = fmt.Sprint(v)
-			}
-		default:
-			out[name] = fmt.Sprint(v)
-		}
-	}
-	return out
-}
-
-func cloneMap(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
-	maps.Copy(out, m)
-	return out
-}
-
-func (s *ToolService) BulkCreate(ctx context.Context, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool) ([]*models.MCPTool, error) {
 	out := make([]*models.MCPTool, 0, len(drafts))
-	for _, d := range drafts {
-		t, err := s.Create(ctx, connectorAPIID, engineType, CreateToolInput{
-			Name:            d.Name,
-			Method:          d.Method,
-			Path:            d.Path,
-			Description:     d.Description,
-			Parameters:      d.Parameters,
-			EndpointMapping: d.EndpointMapping,
-			ResponseMapping: d.ResponseMapping,
-			OutputSchema:    d.OutputSchema,
-		})
-		if err != nil {
-			return out, fmt.Errorf("controlplane: bulk create tool %q: %w", d.Name, err)
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, d := range drafts {
+			t, err := s.createTool(ctx, tx, connectorAPIID, engineType, CreateToolInput{
+				Name:            d.Name,
+				Method:          d.Method,
+				Path:            d.Path,
+				Description:     d.Description,
+				Parameters:      d.Parameters,
+				EndpointMapping: d.EndpointMapping,
+				ResponseMapping: d.ResponseMapping,
+				OutputSchema:    d.OutputSchema,
+			})
+			if err != nil {
+				return fmt.Errorf("tool %q: %w", d.Name, err)
+			}
+			out = append(out, t)
 		}
-		out = append(out, t)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: bulk create tools: %w", err)
 	}
 	return out, nil
 }
 
-func (s *ToolService) ListByConnectorAPI(ctx context.Context, connectorAPIID int64) ([]*models.MCPTool, error) {
+func (s *ToolService) ListByConnectorAPI(ctx context.Context, orgID, connectorAPIID int64) ([]*models.MCPTool, error) {
 	var tools []*models.MCPTool
-	if err := s.db.WithContext(ctx).Where("connector_api_id = ?", connectorAPIID).Order("created_at").Find(&tools).Error; err != nil {
+	err := orgScopedTools(s.db.WithContext(ctx).Model(&models.MCPTool{}), orgID).
+		Where("connector_api_id = ?", connectorAPIID).
+		Order("created_at").
+		Find(&tools).Error
+	if err != nil {
 		return nil, fmt.Errorf("controlplane: list tools: %w", err)
 	}
 	return tools, nil
 }
 
-func (s *ToolService) Get(ctx context.Context, id int64) (*models.MCPTool, error) {
+func (s *ToolService) Get(ctx context.Context, orgID, id int64) (*models.MCPTool, error) {
 	t := &models.MCPTool{}
-	if err := s.db.WithContext(ctx).Where("id = ?", id).First(t).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	err := orgScopedTools(s.db.WithContext(ctx).Model(&models.MCPTool{}), orgID).
+		Where("mcp_tools.id = ?", id).
+		First(t).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: get tool: %w", err)
 	}
 	return t, nil
 }
@@ -273,8 +168,8 @@ type UpdateToolInput struct {
 	GroupID         **int64
 }
 
-func (s *ToolService) Update(ctx context.Context, id int64, in UpdateToolInput) (*models.MCPTool, error) {
-	existing, err := s.Get(ctx, id)
+func (s *ToolService) Update(ctx context.Context, orgID, id int64, in UpdateToolInput) (*models.MCPTool, error) {
+	existing, err := s.Get(ctx, orgID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -325,22 +220,26 @@ func (s *ToolService) Update(ctx context.Context, id int64, in UpdateToolInput) 
 		updates["group_id"] = *in.GroupID
 	}
 	if len(updates) == 0 {
-		return s.Get(ctx, id)
+		return existing, nil
 	}
 	updates["updated_at"] = gorm.Expr("now()")
 
-	res := s.db.WithContext(ctx).Model(&models.MCPTool{}).Where("id = ?", id).Updates(updates)
+	res := orgScopedTools(s.db.WithContext(ctx).Model(&models.MCPTool{}), orgID).
+		Where("mcp_tools.id = ?", id).
+		Updates(updates)
 	if res.Error != nil {
 		return nil, fmt.Errorf("controlplane: update tool: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
 		return nil, ErrNotFound
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, orgID, id)
 }
 
-func (s *ToolService) Delete(ctx context.Context, id int64) error {
-	tx := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.MCPTool{})
+func (s *ToolService) Delete(ctx context.Context, orgID, id int64) error {
+	tx := orgScopedTools(s.db.WithContext(ctx).Model(&models.MCPTool{}), orgID).
+		Where("mcp_tools.id = ?", id).
+		Delete(&models.MCPTool{})
 	if tx.Error != nil {
 		return fmt.Errorf("controlplane: delete tool: %w", tx.Error)
 	}
@@ -350,23 +249,25 @@ func (s *ToolService) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *ToolService) ResolveForServer(ctx context.Context, mcpServerID int64, toolName string) (*dispatcher.ToolLookup, error) {
+const resolveForServerSQL = `
+	SELECT t.id, t.connector_api_id, t.group_id, t.engine_type, t.name, t.method, t.path,
+	       t.description, t.parameters, t.endpoint_mapping, t.response_mapping, t.output_schema,
+	       t.cached, t.cache_ttl_seconds, t.status, t.version, coalesce(t.display_title,'') AS display_title,
+	       t.display_on_frontend, t.created_at, t.updated_at,
+	       a.id AS api_id, a.connector_id AS api_connector_id, a.name AS api_name, a.engine_type AS api_engine_type,
+	       a.base_url AS api_base_url, a.auth_type AS api_auth_type, coalesce(a.spec_url,'') AS api_spec_url,
+	       a.is_active AS api_is_active, a.created_at AS api_created_at, a.updated_at AS api_updated_at
+	FROM mcp_tools t
+	JOIN connector_apis a ON a.id = t.connector_api_id
+	JOIN mcp_server_tool_groups g ON g.tool_group_id = t.group_id AND g.mcp_server_id = ?
+	JOIN mcp_servers s ON s.id = g.mcp_server_id AND s.organization_id = ?
+	WHERE t.name = ? AND t.status = 'active'`
+
+func (s *ToolService) ResolveForServer(ctx context.Context, orgID, mcpServerID int64, toolName string) (*models.ResolvedTool, error) {
 	t := &models.MCPTool{}
 	a := &models.ConnectorAPI{}
-	row := s.db.WithContext(ctx).Raw(`
-		SELECT t.id, t.connector_api_id, t.group_id, t.engine_type, t.name, t.method, t.path,
-		       t.description, t.parameters, t.endpoint_mapping, t.response_mapping, t.output_schema,
-		       t.cached, t.cache_ttl_seconds, t.status, t.version, coalesce(t.display_title,'') AS display_title, t.display_on_frontend,
-		       t.created_at, t.updated_at,
-		       a.id AS api_id, a.connector_id AS api_connector_id, a.name AS api_name, a.engine_type AS api_engine_type,
-		       a.base_url AS api_base_url, a.auth_type AS api_auth_type, coalesce(a.spec_url,'') AS api_spec_url,
-		       a.is_active AS api_is_active, a.created_at AS api_created_at, a.updated_at AS api_updated_at
-		FROM mcp_tools t
-		JOIN connector_apis a ON a.id = t.connector_api_id
-		JOIN mcp_server_tool_groups g ON g.tool_group_id = t.group_id AND g.mcp_server_id = ?
-		WHERE t.name = ? AND t.status = 'active'
-	`, mcpServerID, toolName).Row()
 
+	row := s.db.WithContext(ctx).Raw(resolveForServerSQL, mcpServerID, orgID, toolName).Row()
 	err := row.Scan(
 		&t.ID, &t.ConnectorAPIID, &t.GroupID, &t.EngineType, &t.Name, &t.Method, &t.Path,
 		&t.Description, &t.Parameters, &t.EndpointMapping, &t.ResponseMapping, &t.OutputSchema,
@@ -376,18 +277,19 @@ func (s *ToolService) ResolveForServer(ctx context.Context, mcpServerID int64, t
 		&a.IsActive, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("controlplane: tool %q not found or not assigned to this server", toolName)
+		return nil, fmt.Errorf("controlplane: tool %q is not exposed by this server: %w", toolName, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: resolve tool: %w", err)
 	}
-	return &dispatcher.ToolLookup{Tool: t, API: a, ConnectorID: a.ConnectorID}, nil
+	return &models.ResolvedTool{Tool: t, API: a}, nil
 }
 
-func (s *ToolService) ListForServer(ctx context.Context, mcpServerID int64) ([]*models.MCPTool, error) {
+func (s *ToolService) ListForServer(ctx context.Context, orgID, mcpServerID int64) ([]*models.MCPTool, error) {
 	var tools []*models.MCPTool
-	err := s.db.WithContext(ctx).
+	err := s.db.WithContext(ctx).Model(&models.MCPTool{}).
 		Joins("JOIN mcp_server_tool_groups g ON g.tool_group_id = mcp_tools.group_id AND g.mcp_server_id = ?", mcpServerID).
+		Joins("JOIN mcp_servers s ON s.id = g.mcp_server_id AND s.organization_id = ?", orgID).
 		Where("mcp_tools.status = ?", models.ToolActive).
 		Order("mcp_tools.name").
 		Find(&tools).Error

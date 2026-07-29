@@ -1,25 +1,25 @@
 package engines
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"time"
 
 	"gridhook.dev/connector-backend/internal/auth/schemes"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
 type GraphQLEngine struct {
-	Client *http.Client
+	client *httpx.Client
 }
 
-func NewGraphQLEngine() *GraphQLEngine {
-	return &GraphQLEngine{Client: &http.Client{Timeout: 30 * time.Second}}
+func NewGraphQLEngine(client *httpx.Client) *GraphQLEngine {
+	return &GraphQLEngine{client: client}
 }
+
+var _ Engine = (*GraphQLEngine)(nil)
 
 type graphqlRequestBody struct {
 	Query         string         `json:"query"`
@@ -34,12 +34,16 @@ func (e *GraphQLEngine) Execute(ctx context.Context, api *models.ConnectorAPI, t
 	}
 	operationName, _ := tool.EndpointMapping["operationName"].(string)
 
-	payload, err := json.Marshal(graphqlRequestBody{Query: query, OperationName: operationName, Variables: input})
+	payload, err := json.Marshal(graphqlRequestBody{
+		Query:         query,
+		OperationName: operationName,
+		Variables:     input,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("engines: graphql: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.BaseURL, bytes.NewReader(payload))
+	req, err := httpx.NewRequest(ctx, http.MethodPost, api.BaseURL, payload)
 	if err != nil {
 		return nil, fmt.Errorf("engines: graphql: build request: %w", err)
 	}
@@ -47,29 +51,15 @@ func (e *GraphQLEngine) Execute(ctx context.Context, api *models.ConnectorAPI, t
 	for k, v := range staticHeadersFrom(tool.EndpointMapping) {
 		req.Header.Set(k, v)
 	}
-	for k, v := range creds.Headers {
-		req.Header.Set(k, v)
-	}
+	applyCredentials(req, creds)
 
-	resp, err := e.Client.Do(req)
+	resp, err := e.client.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("engines: graphql: %w", err)
 	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("engines: graphql: read response: %w", err)
-	}
-
-	var decoded any
-	if json.Unmarshal(raw, &decoded) != nil {
-		decoded = string(raw)
-	}
-
 	return &Result{
 		StatusCode: resp.StatusCode,
 		Headers:    flattenHeaders(resp.Header),
-		Body:       decoded,
+		Body:       decodeBody(resp.Body),
 	}, nil
 }

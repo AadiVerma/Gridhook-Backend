@@ -1,27 +1,26 @@
 package engines
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"gridhook.dev/connector-backend/internal/auth/schemes"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
 type RestEngine struct {
-	Client *http.Client
+	client *httpx.Client
 }
 
-func NewRestEngine() *RestEngine {
-	return &RestEngine{Client: &http.Client{Timeout: 30 * time.Second}}
+func NewRestEngine(client *httpx.Client) *RestEngine {
+	return &RestEngine{client: client}
 }
+
+var _ Engine = (*RestEngine)(nil)
 
 func (e *RestEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool *models.MCPTool, creds schemes.Credentials, input map[string]any) (*Result, error) {
 	mapping := parseRestMapping(tool.EndpointMapping)
@@ -31,37 +30,22 @@ func (e *RestEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 		return nil, err
 	}
 
-	query := url.Values{}
-	body := map[string]any{}
-	for key, val := range remaining {
-		switch {
-		case mapping.queryParams[key]:
-			query.Set(key, fmt.Sprint(val))
-		case mapping.bodyParams[key]:
-			body[key] = val
-		case tool.Method == models.MethodGET || tool.Method == models.MethodDELETE:
-			query.Set(key, fmt.Sprint(val))
-		default:
-			body[key] = val
-		}
+	query, body := partitionParams(tool.Method, mapping, remaining)
+
+	endpoint, err := buildURL(api.BaseURL, path, query)
+	if err != nil {
+		return nil, err
 	}
 
-	fullURL := strings.TrimRight(api.BaseURL, "/") + "/" + strings.TrimLeft(path, "/")
-	if len(query) > 0 {
-		fullURL += "?" + query.Encode()
-	}
-
-	var reqBody io.Reader
-	hasBody := tool.Method != models.MethodGET && tool.Method != models.MethodDELETE && len(body) > 0
+	var payload []byte
+	hasBody := methodAcceptsBody(tool.Method) && len(body) > 0
 	if hasBody {
-		raw, err := json.Marshal(body)
-		if err != nil {
+		if payload, err = json.Marshal(body); err != nil {
 			return nil, fmt.Errorf("engines: rest: marshal body: %w", err)
 		}
-		reqBody = bytes.NewReader(raw)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, string(tool.Method), fullURL, reqBody)
+	req, err := httpx.NewRequest(ctx, string(tool.Method), endpoint, payload)
 	if err != nil {
 		return nil, fmt.Errorf("engines: rest: build request: %w", err)
 	}
@@ -71,34 +55,67 @@ func (e *RestEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 	for k, v := range mapping.staticHeaders {
 		req.Header.Set(k, v)
 	}
-	for k, v := range creds.Headers {
-		req.Header.Set(k, v)
-	}
-	for k, v := range creds.QueryParams {
-		q := req.URL.Query()
-		q.Set(k, v)
-		req.URL.RawQuery = q.Encode()
-	}
+	applyCredentials(req, creds)
 
-	resp, err := e.Client.Do(req)
+	resp, err := e.client.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("engines: rest: %w", err)
 	}
-	defer resp.Body.Close()
+	return &Result{
+		StatusCode: resp.StatusCode,
+		Headers:    flattenHeaders(resp.Header),
+		Body:       decodeBody(resp.Body),
+	}, nil
+}
 
-	raw, err := io.ReadAll(resp.Body)
+func buildURL(baseURL, path string, query url.Values) (string, error) {
+	base, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("engines: rest: read response: %w", err)
+		return "", fmt.Errorf("engines: rest: invalid base URL: %w", err)
+	}
+	if base.Scheme != "http" && base.Scheme != "https" {
+		return "", fmt.Errorf("engines: rest: base URL scheme must be http or https, got %q", base.Scheme)
 	}
 
-	result := &Result{StatusCode: resp.StatusCode, Headers: flattenHeaders(resp.Header)}
-	var decoded any
-	if len(raw) > 0 && json.Unmarshal(raw, &decoded) == nil {
-		result.Body = decoded
-	} else {
-		result.Body = string(raw)
+	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(path, "/")
+
+	if len(query) > 0 {
+		existing := base.Query()
+		for key, values := range query {
+			for _, v := range values {
+				existing.Set(key, v)
+			}
+		}
+		base.RawQuery = existing.Encode()
 	}
-	return result, nil
+	return base.String(), nil
+}
+
+func partitionParams(method models.HTTPMethod, mapping restMapping, remaining map[string]any) (url.Values, map[string]any) {
+	query := url.Values{}
+	body := make(map[string]any, len(remaining))
+	for key, val := range remaining {
+		switch {
+		case mapping.queryParams[key]:
+			query.Set(key, fmt.Sprint(val))
+		case mapping.bodyParams[key]:
+			body[key] = val
+		case !methodAcceptsBody(method):
+			query.Set(key, fmt.Sprint(val))
+		default:
+			body[key] = val
+		}
+	}
+	return query, body
+}
+
+func methodAcceptsBody(method models.HTTPMethod) bool {
+	switch method {
+	case models.MethodGET, models.MethodDELETE:
+		return false
+	default:
+		return true
+	}
 }
 
 type restMapping struct {
@@ -118,11 +135,13 @@ func parseRestMapping(raw map[string]any) restMapping {
 }
 
 func toSet(v any) map[string]bool {
-	set := map[string]bool{}
-	if list, ok := v.([]any); ok {
-		for _, item := range list {
-			set[fmt.Sprint(item)] = true
-		}
+	list, ok := v.([]any)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(list))
+	for _, item := range list {
+		set[fmt.Sprint(item)] = true
 	}
 	return set
 }
@@ -147,12 +166,4 @@ func substitutePath(pathTemplate string, pathParams map[string]bool, input map[s
 		delete(remaining, name)
 	}
 	return path, remaining, nil
-}
-
-func flattenHeaders(h http.Header) map[string]string {
-	out := make(map[string]string, len(h))
-	for k := range h {
-		out[k] = h.Get(k)
-	}
-	return out
 }

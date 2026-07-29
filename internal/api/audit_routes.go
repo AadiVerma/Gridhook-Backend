@@ -1,9 +1,8 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/csv"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,97 +13,137 @@ import (
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-func registerAuditLogRoutes(r chi.Router, d Deps) {
-	r.Get("/audit-logs", func(w http.ResponseWriter, r *http.Request) {
-		p := pagination(r)
-		connectorID, ok := intQueryParam(w, r, "connector")
-		if !ok {
-			return
-		}
-		serverID, ok := intQueryParam(w, r, "server")
-		if !ok {
-			return
-		}
-		toolID, ok := intQueryParam(w, r, "tool")
-		if !ok {
-			return
-		}
-		filter := audit.ListFilter{
-			Status:      r.URL.Query().Get("status"),
-			ConnectorID: connectorID,
-			ServerID:    serverID,
-			ToolID:      toolID,
-			Page:        p.Page,
-			PageSize:    p.PageSize,
-		}
-		if from := parseTime(r.URL.Query().Get("from")); from != nil {
-			filter.From = from
-		}
-		if to := parseTime(r.URL.Query().Get("to")); to != nil {
-			filter.To = to
-		}
+const exportPageSize = 1000
 
-		list, total, err := d.Audit.List(r.Context(), orgIDFromContext(r), filter)
+func registerAuditLogRoutes(r chi.Router, d Deps) {
+	r.Get("/audit-logs", handleListAuditLogs(d))
+	r.Get("/audit-logs/export", handleExportAuditLogs(d))
+
+	r.Get("/audit-logs/{id}", handleGetAuditLog(d))
+}
+
+func auditFilterFromRequest(w http.ResponseWriter, r *http.Request) (audit.ListFilter, bool) {
+	connectorID, ok := intQueryParam(w, r, "connector")
+	if !ok {
+		return audit.ListFilter{}, false
+	}
+	serverID, ok := intQueryParam(w, r, "server")
+	if !ok {
+		return audit.ListFilter{}, false
+	}
+	toolID, ok := intQueryParam(w, r, "tool")
+	if !ok {
+		return audit.ListFilter{}, false
+	}
+
+	filter := audit.ListFilter{
+		Status:      r.URL.Query().Get("status"),
+		ConnectorID: connectorID,
+		ServerID:    serverID,
+		ToolID:      toolID,
+	}
+	if from := parseTime(r.URL.Query().Get("from")); from != nil {
+		filter.From = from
+	}
+	if to := parseTime(r.URL.Query().Get("to")); to != nil {
+		filter.To = to
+	}
+	return filter, true
+}
+
+func handleListAuditLogs(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		filter, ok := auditFilterFromRequest(w, r)
+		if !ok {
+			return
+		}
+		p := pagination(r)
+		filter.Page, filter.PageSize = p.Page, p.PageSize
+
+		list, total, err := d.AuditReader.List(r.Context(), orgIDFromContext(r), filter)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, paginated(list, p, total))
-	})
+	}
+}
 
-	r.Get("/audit-logs/{id}", func(w http.ResponseWriter, r *http.Request) {
+func handleGetAuditLog(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := intIDParam(w, r, "id")
 		if !ok {
 			return
 		}
-		inv, err := d.Audit.Get(r.Context(), orgIDFromContext(r), id)
+		inv, err := d.AuditReader.Get(r.Context(), orgIDFromContext(r), id)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, inv)
-	})
+	}
+}
 
-	r.Get("/audit-logs/export", func(w http.ResponseWriter, r *http.Request) {
-		connectorID, ok := intQueryParam(w, r, "connector")
+func handleExportAuditLogs(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		filter, ok := auditFilterFromRequest(w, r)
 		if !ok {
 			return
 		}
-		serverID, ok := intQueryParam(w, r, "server")
-		if !ok {
-			return
-		}
-		toolID, ok := intQueryParam(w, r, "tool")
-		if !ok {
-			return
-		}
-		filter := audit.ListFilter{
-			Status:      r.URL.Query().Get("status"),
-			ConnectorID: connectorID,
-			ServerID:    serverID,
-			ToolID:      toolID,
-			Page:        1,
-			PageSize:    10000,
-		}
-		list, _, err := d.Audit.List(r.Context(), orgIDFromContext(r), filter)
-		if err != nil {
-			handleServiceError(w, err)
-			return
-		}
+		orgID := orgIDFromContext(r)
+		filter.PageSize = exportPageSize
 
-		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="audit-logs.csv"`)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"id", "time", "tool_id", "connector_id", "server_id", "status", "http_code", "duration_ms", "error"})
-		for _, inv := range list {
-			_ = cw.Write([]string{
-				strconv.FormatInt(inv.ID, 10), inv.CreatedAt.Format(time.RFC3339), strconv.FormatInt(inv.ToolID, 10),
-				strconv.FormatInt(inv.ConnectorID, 10), formatOptionalID(inv.MCPServerID),
-				string(inv.Status), fmt.Sprint(inv.HTTPCode), fmt.Sprint(inv.DurationMs), inv.Error,
-			})
+		if err := cw.Write([]string{
+			"id", "time", "tool_id", "connector_id", "server_id",
+			"status", "http_code", "duration_ms", "error",
+		}); err != nil {
+			d.Logger.ErrorContext(r.Context(), "audit export: write header", errAttr(err))
+			return
 		}
-		cw.Flush()
-	})
+
+		for page := 1; ; page++ {
+			filter.Page = page
+			batch, total, err := d.AuditReader.List(r.Context(), orgID, filter)
+			if err != nil {
+
+				d.Logger.ErrorContext(r.Context(), "audit export: list page", errAttr(err))
+				return
+			}
+			for _, inv := range batch {
+				if err := cw.Write(invocationCSVRow(inv)); err != nil {
+					d.Logger.ErrorContext(r.Context(), "audit export: write row", errAttr(err))
+					return
+				}
+			}
+			cw.Flush()
+			if err := cw.Error(); err != nil {
+				d.Logger.ErrorContext(r.Context(), "audit export: flush", errAttr(err))
+				return
+			}
+			if len(batch) < filter.PageSize || page*filter.PageSize >= total {
+				return
+			}
+		}
+	}
+}
+
+func invocationCSVRow(inv *models.ToolInvocation) []string {
+	return []string{
+		strconv.FormatInt(inv.ID, 10),
+		inv.CreatedAt.Format(time.RFC3339),
+		strconv.FormatInt(inv.ToolID, 10),
+		strconv.FormatInt(inv.ConnectorID, 10),
+		formatOptionalID(inv.MCPServerID),
+		string(inv.Status),
+		strconv.Itoa(inv.HTTPCode),
+		strconv.Itoa(inv.DurationMs),
+		inv.Error,
+	}
 }
 
 func parseTime(s string) *time.Time {
@@ -120,19 +159,31 @@ func parseTime(s string) *time.Time {
 
 func handleInternalAuditIngest(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if d.InternalToken == "" || r.Header.Get("X-Internal-Token") != d.InternalToken {
-			apiError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing internal token")
+		if d.InternalToken == "" {
+			apiError(w, r, http.StatusNotFound, "not_found", "internal ingest is not enabled")
 			return
 		}
+		presented := r.Header.Get("X-Internal-Token")
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(d.InternalToken)) != 1 {
+			apiError(w, r, http.StatusUnauthorized, "unauthorized", "invalid or missing internal token")
+			return
+		}
+
 		var inv models.ToolInvocation
-		if err := json.NewDecoder(r.Body).Decode(&inv); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &inv); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+		if inv.OrganizationID == 0 || inv.ToolID == 0 {
+			apiError(w, r, http.StatusBadRequest, "invalid_body",
+				"organizationId and toolId are required")
 			return
 		}
 		if inv.CreatedAt.IsZero() {
 			inv.CreatedAt = time.Now()
 		}
-		d.Audit.Write(r.Context(), &inv)
+
+		d.AuditRecorder.Write(r.Context(), &inv)
 		w.WriteHeader(http.StatusAccepted)
 	}
 }

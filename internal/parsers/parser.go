@@ -1,6 +1,20 @@
 package parsers
 
-import "gridhook.dev/connector-backend/internal/models"
+import (
+	"slices"
+
+	"gridhook.dev/connector-backend/internal/models"
+)
+
+type Format = string
+
+const (
+	FormatOpenAPI    Format = "openapi"
+	FormatWSDL       Format = "wsdl"
+	FormatPostman    Format = "postman"
+	FormatCurl       Format = "curl"
+	FormatGraphQLSDL Format = "graphql-sdl"
+)
 
 type DraftTool struct {
 	Name            string
@@ -24,22 +38,31 @@ type Parser interface {
 }
 
 type Registry struct {
-	parsers map[string]Parser
+	parsers map[Format]Parser
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		parsers: map[string]Parser{
-			"openapi":     &OpenAPIParser{},
-			"wsdl":        &WSDLParser{},
-			"postman":     &PostmanParser{},
-			"curl":        &CurlParser{},
-			"graphql-sdl": &GraphQLSDLParser{},
+		parsers: map[Format]Parser{
+			FormatOpenAPI:    &OpenAPIParser{},
+			FormatWSDL:       &WSDLParser{},
+			FormatPostman:    &PostmanParser{},
+			FormatCurl:       &CurlParser{},
+			FormatGraphQLSDL: &GraphQLSDLParser{},
 		},
 	}
 }
 
-func (r *Registry) For(format string) (Parser, bool) {
+func (r *Registry) For(format Format) (Parser, bool) {
 	p, ok := r.parsers[format]
 	return p, ok
+}
+
+func (r *Registry) Formats() []Format {
+	out := make([]Format, 0, len(r.parsers))
+	for name := range r.parsers {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
 }

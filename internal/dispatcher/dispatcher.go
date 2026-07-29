@@ -9,17 +9,12 @@ import (
 
 	"gridhook.dev/connector-backend/internal/auth/schemes"
 	"gridhook.dev/connector-backend/internal/engines"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
-type ToolLookup struct {
-	Tool        *models.MCPTool
-	API         *models.ConnectorAPI
-	ConnectorID int64
-}
-
 type ToolStore interface {
-	ResolveForServer(ctx context.Context, mcpServerID int64, toolName string) (*ToolLookup, error)
+	ResolveForServer(ctx context.Context, orgID, mcpServerID int64, toolName string) (*models.ResolvedTool, error)
 }
 
 type CredentialResolver interface {
@@ -37,11 +32,11 @@ type Identity struct {
 }
 
 type Outcome struct {
-	Status     models.InvocationStatus
-	HTTPCode   int
-	Body       any
-	Error      string
-	DurationMs int
+	Status     models.InvocationStatus `json:"status"`
+	HTTPCode   int                     `json:"httpCode,omitempty"`
+	Body       any                     `json:"body,omitempty"`
+	Error      string                  `json:"error,omitempty"`
+	DurationMs int                     `json:"durationMs"`
 }
 
 type Dispatcher struct {
@@ -56,7 +51,7 @@ func New(tools ToolStore, broker CredentialResolver, registry *engines.Registry,
 }
 
 func (d *Dispatcher) Invoke(ctx context.Context, mcpServerID int64, toolName string, input map[string]any, ident Identity) (*Outcome, error) {
-	lookup, err := d.tools.ResolveForServer(ctx, mcpServerID, toolName)
+	lookup, err := d.tools.ResolveForServer(ctx, ident.OrganizationID, mcpServerID, toolName)
 	if err != nil {
 		return nil, fmt.Errorf("dispatcher: resolve tool %q: %w", toolName, err)
 	}
@@ -64,11 +59,11 @@ func (d *Dispatcher) Invoke(ctx context.Context, mcpServerID int64, toolName str
 }
 
 func (d *Dispatcher) InvokeDirect(ctx context.Context, tool *models.MCPTool, api *models.ConnectorAPI, input map[string]any, ident Identity) (*Outcome, error) {
-	lookup := &ToolLookup{Tool: tool, API: api, ConnectorID: api.ConnectorID}
+	lookup := &models.ResolvedTool{Tool: tool, API: api}
 	return d.dispatch(ctx, lookup, 0, input, ident)
 }
 
-func (d *Dispatcher) dispatch(ctx context.Context, lookup *ToolLookup, mcpServerID int64, input map[string]any, ident Identity) (*Outcome, error) {
+func (d *Dispatcher) dispatch(ctx context.Context, lookup *models.ResolvedTool, mcpServerID int64, input map[string]any, ident Identity) (*Outcome, error) {
 	start := time.Now()
 
 	creds, err := d.broker.Resolve(ctx, lookup.API)
@@ -82,16 +77,15 @@ func (d *Dispatcher) dispatch(ctx context.Context, lookup *ToolLookup, mcpServer
 	}
 
 	result, execErr := engine.Execute(ctx, lookup.API, lookup.Tool, creds, input)
-	duration := time.Since(start)
+	outcome := normalize(result, execErr, time.Since(start))
 
-	outcome := normalize(result, execErr, duration)
 	if outcome.Status == models.InvocationSuccess {
 		outcome.Body = applyResponseMapping(lookup.Tool.ResponseMapping, outcome.Body)
 	}
 
 	d.audit.Write(ctx, &models.ToolInvocation{
 		ToolID:         lookup.Tool.ID,
-		ConnectorID:    lookup.ConnectorID,
+		ConnectorID:    lookup.ConnectorID(),
 		ConnectorAPIID: lookup.API.ID,
 		MCPServerID:    mcpServerID,
 		OrganizationID: ident.OrganizationID,
@@ -111,27 +105,53 @@ func (d *Dispatcher) dispatch(ctx context.Context, lookup *ToolLookup, mcpServer
 
 func normalize(result *engines.Result, err error, duration time.Duration) *Outcome {
 	ms := int(duration.Milliseconds())
+
 	if err != nil {
-		status := models.InvocationError
-		var netErr net.Error
-		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-			status = models.InvocationTimeout
+		return &Outcome{
+			Status:     classifyError(err),
+			Error:      httpx.SanitizeError(err).Error(),
+			DurationMs: ms,
 		}
-		return &Outcome{Status: status, Error: err.Error(), DurationMs: ms}
 	}
-	status := models.InvocationSuccess
+	if result == nil {
+		return &Outcome{
+			Status:     models.InvocationError,
+			Error:      "engine returned no result",
+			DurationMs: ms,
+		}
+	}
+
+	outcome := &Outcome{
+		Status:     models.InvocationSuccess,
+		HTTPCode:   result.StatusCode,
+		Body:       result.Body,
+		DurationMs: ms,
+	}
 	if result.StatusCode >= 400 {
-		status = models.InvocationError
+		outcome.Status = models.InvocationError
+
+		outcome.Error = fmt.Sprintf("upstream returned HTTP %d", result.StatusCode)
 	}
-	return &Outcome{Status: status, HTTPCode: result.StatusCode, Body: result.Body, DurationMs: ms}
+	return outcome
+}
+
+func classifyError(err error) models.InvocationStatus {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return models.InvocationTimeout
+	}
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		return models.InvocationTimeout
+	}
+	return models.InvocationError
 }
 
 func asMap(v any) map[string]any {
-	if m, ok := v.(map[string]any); ok {
-		return m
-	}
-	if v == nil {
+	switch typed := v.(type) {
+	case nil:
 		return map[string]any{}
+	case map[string]any:
+		return typed
+	default:
+		return map[string]any{"value": typed}
 	}
-	return map[string]any{"value": v}
 }

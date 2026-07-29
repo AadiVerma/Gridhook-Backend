@@ -87,13 +87,3 @@ type ConnectorCredentials struct {
 }
 
 func (ConnectorCredentials) TableName() string { return "connector_credentials" }
-
-type ConnectorUserMapping struct {
-	ID             int64     `json:"id" gorm:"column:id;primaryKey"`
-	ConnectorAPIID int64     `json:"connectorApiId" gorm:"column:connector_api_id"`
-	UserID         int64     `json:"userId" gorm:"column:user_id"`
-	MetaData       JSONMap   `json:"metaData" gorm:"column:meta_data"`
-	CreatedAt      time.Time `json:"createdAt" gorm:"column:created_at"`
-}
-
-func (ConnectorUserMapping) TableName() string { return "connector_user_mappings" }

@@ -9,70 +9,87 @@ import (
 )
 
 func registerGroupRoutes(r chi.Router, d Deps) {
-	r.Get("/tool-groups", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/tool-groups", handleListGroups(d))
+	r.Post("/tool-groups", handleCreateGroup(d))
+	r.Get("/tool-groups/{id}", handleGetGroup(d))
+	r.Delete("/tool-groups/{id}", handleDeleteGroup(d))
+	r.Put("/tool-groups/{id}/tools", handleAssignGroupTools(d))
+}
+
+func handleListGroups(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		groups, err := d.Groups.List(r.Context(), orgIDFromContext(r))
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, groups)
-	})
+	}
+}
 
-	r.Post("/tool-groups", func(w http.ResponseWriter, r *http.Request) {
+func handleCreateGroup(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		var body controlplane.CreateGroupInput
-		if err := decodeJSON(r, &body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
 		g, err := d.Groups.Create(r.Context(), orgIDFromContext(r), body)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, g)
-	})
+	}
+}
 
-	r.Get("/tool-groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+func handleGetGroup(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := intIDParam(w, r, "id")
 		if !ok {
 			return
 		}
 		g, err := d.Groups.Get(r.Context(), orgIDFromContext(r), id)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, g)
-	})
+	}
+}
 
-	r.Delete("/tool-groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+func handleDeleteGroup(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := intIDParam(w, r, "id")
 		if !ok {
 			return
 		}
 		if err := d.Groups.Delete(r.Context(), orgIDFromContext(r), id); err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}
+}
 
-	r.Put("/tool-groups/{id}/tools", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			ToolIDs []int64 `json:"toolIds"`
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
-			return
-		}
+func handleAssignGroupTools(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := intIDParam(w, r, "id")
 		if !ok {
 			return
 		}
-		if err := d.Groups.AssignTools(r.Context(), id, body.ToolIDs); err != nil {
-			handleServiceError(w, err)
+		var body struct {
+			ToolIDs []int64 `json:"toolIds"`
+		}
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+
+		if err := d.Groups.AssignTools(r.Context(), orgIDFromContext(r), id, body.ToolIDs); err != nil {
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}
 }

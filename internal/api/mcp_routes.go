@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -12,27 +11,40 @@ import (
 )
 
 func registerMCPRoutes(r chi.Router, d Deps) {
-	r.Use(requireMCPAPIKey(d))
+	r.Route("/{slug}", func(r chi.Router) {
+		r.Use(requireMCPAPIKey(d))
 
-	r.Get("/{slug}/tools", func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/tools", handleMCPListTools(d))
+		r.Post("/", handleMCPInvoke(d))
+	})
+}
+
+func handleMCPListTools(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		srv := mcpServerFromContext(r)
-		tools, err := d.Tools.ListForServer(r.Context(), srv.ID)
+		tools, err := d.Tools.ListForServer(r.Context(), srv.OrganizationID, srv.ID)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"tools": toMCPToolSchemas(tools)})
-	})
+	}
+}
 
-	r.Post("/{slug}/", func(w http.ResponseWriter, r *http.Request) {
+func handleMCPInvoke(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		srv := mcpServerFromContext(r)
 
 		var body struct {
 			Tool  string         `json:"tool"`
 			Input map[string]any `json:"input"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
+			return
+		}
+		if body.Tool == "" {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", "tool is required")
 			return
 		}
 
@@ -40,46 +52,44 @@ func registerMCPRoutes(r chi.Router, d Deps) {
 			OrganizationID: srv.OrganizationID,
 		})
 		if err != nil {
-			apiError(w, http.StatusBadRequest, "dispatch_failed", err.Error())
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, outcome)
-	})
+	}
 }
 
-type mcpAuthCtxKey string
-
-const mcpServerCtxKey mcpAuthCtxKey = "gridhook.mcpServer"
+type mcpAuthCtxKey struct{}
 
 func requireMCPAPIKey(d Deps) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := bearerToken(r)
 			if key == "" {
-				apiError(w, http.StatusUnauthorized, "unauthorized", "missing API key")
+				apiError(w, r, http.StatusUnauthorized, "unauthorized", "missing API key")
 				return
 			}
 			srv, err := d.Servers.VerifyAPIKey(r.Context(), key)
 			if err != nil {
-				apiError(w, http.StatusUnauthorized, "unauthorized", "invalid or revoked API key")
+				apiError(w, r, http.StatusUnauthorized, "unauthorized", "invalid or revoked API key")
 				return
 			}
-			if slug := chi.URLParam(r, "slug"); slug != "" && slug != srv.Slug {
-				apiError(w, http.StatusForbidden, "forbidden", "API key does not belong to this server")
+
+			if slug := chi.URLParam(r, "slug"); slug != srv.Slug {
+				apiError(w, r, http.StatusForbidden, "forbidden", "API key does not belong to this server")
 				return
 			}
 			if srv.Status != models.ServerRunning {
-				apiError(w, http.StatusServiceUnavailable, "server_stopped", "this MCP server is stopped")
+				apiError(w, r, http.StatusServiceUnavailable, "server_stopped", "this MCP server is stopped")
 				return
 			}
-			ctx := context.WithValue(r.Context(), mcpServerCtxKey, srv)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpAuthCtxKey{}, srv)))
 		})
 	}
 }
 
 func mcpServerFromContext(r *http.Request) *models.MCPServer {
-	srv, _ := r.Context().Value(mcpServerCtxKey).(*models.MCPServer)
+	srv, _ := r.Context().Value(mcpAuthCtxKey{}).(*models.MCPServer)
 	return srv
 }
 

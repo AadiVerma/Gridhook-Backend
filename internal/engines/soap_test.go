@@ -19,7 +19,7 @@ func TestSoapEngine_Execute_PlaceholderSyntax(t *testing.T) {
 		raw, _ := io.ReadAll(r.Body)
 		capturedBody = string(raw)
 		capturedHeaders = r.Header
-		w.Write([]byte(`<Envelope><Body><ok/></Body></Envelope>`))
+		_, _ = w.Write([]byte(`<Envelope><Body><ok/></Body></Envelope>`))
 	}))
 	defer server.Close()
 
@@ -33,7 +33,7 @@ func TestSoapEngine_Execute_PlaceholderSyntax(t *testing.T) {
 		},
 	}
 
-	_, err := NewSoapEngine().Execute(context.Background(), api, tool, schemes.Credentials{Headers: map[string]string{"Authorization": "Bearer tok"}}, map[string]any{
+	_, err := NewSoapEngine(newTestClient(t)).Execute(context.Background(), api, tool, schemes.Credentials{Headers: map[string]string{"Authorization": "Bearer tok"}}, map[string]any{
 		"doubleParam": "d-value",
 		"singleParam": "s-value",
 	})
@@ -64,7 +64,7 @@ func TestSoapEngine_Execute_PlaceholderSyntax(t *testing.T) {
 
 func TestSoapEngine_Execute_NoEnvelopeTemplate(t *testing.T) {
 	tool := &models.MCPTool{Name: "broken", EndpointMapping: map[string]any{}}
-	_, err := NewSoapEngine().Execute(context.Background(), &models.ConnectorAPI{}, tool, schemes.Credentials{}, nil)
+	_, err := NewSoapEngine(newTestClient(t)).Execute(context.Background(), &models.ConnectorAPI{}, tool, schemes.Credentials{}, nil)
 	if err == nil {
 		t.Fatal("expected error for missing envelopeTemplate, got nil")
 	}

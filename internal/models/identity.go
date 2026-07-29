@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 type UserRole string
 
@@ -11,12 +14,36 @@ const (
 	RoleViewer    UserRole = "viewer"
 )
 
+var AllUserRoles = []UserRole{RoleOwner, RoleAdmin, RoleDeveloper, RoleViewer}
+
+func (r UserRole) Valid() bool { return slices.Contains(AllUserRoles, r) }
+
+func UserRoleNames() []string {
+	out := make([]string, len(AllUserRoles))
+	for i, r := range AllUserRoles {
+		out[i] = string(r)
+	}
+	return out
+}
+
 type UserStatus string
 
 const (
 	UserStatusActive  UserStatus = "active"
 	UserStatusInvited UserStatus = "invited"
 )
+
+var AllUserStatuses = []UserStatus{UserStatusActive, UserStatusInvited}
+
+func (s UserStatus) Valid() bool { return slices.Contains(AllUserStatuses, s) }
+
+func UserStatusNames() []string {
+	out := make([]string, len(AllUserStatuses))
+	for i, s := range AllUserStatuses {
+		out[i] = string(s)
+	}
+	return out
+}
 
 type Company struct {
 	ID        int64     `json:"id" gorm:"column:id;primaryKey"`
@@ -47,10 +74,6 @@ type Organization struct {
 
 func (Organization) TableName() string { return "organizations" }
 
-// User is one row per (email, organization) — the same email can have
-// multiple rows across different organizations (each joined via an invite,
-// built later), each with its own role/status. UNIQUE(email, organization_id)
-// enforces at most one row per org for a given email.
 type User struct {
 	ID             int64      `json:"id" gorm:"column:id;primaryKey"`
 	OrganizationID int64      `json:"organizationId" gorm:"column:organization_id"`

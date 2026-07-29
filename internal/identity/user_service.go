@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -15,6 +16,7 @@ import (
 var (
 	ErrUserNotFound   = errors.New("identity: user not found")
 	ErrAlreadyAMember = errors.New("identity: already a member of this organization")
+	ErrInvalidRole    = errors.New("identity: invalid role")
 )
 
 type UserService struct {
@@ -33,12 +35,16 @@ func (s *UserService) List(ctx context.Context, orgID int64) ([]*models.User, er
 	return users, nil
 }
 
-// Invite adds email as a member of orgID. If that email already has a row
-// in another organization, its existing password_hash is copied over (so
-// they keep logging in with the same password everywhere — see Login's
-// invariant); otherwise a random placeholder password is set, pending the
-// accept-invite flow.
 func (s *UserService) Invite(ctx context.Context, orgID int64, email, name string, role models.UserRole) (*models.User, error) {
+	email, err := NormalizeEmail(email)
+	if err != nil {
+		return nil, err
+	}
+	if !role.Valid() {
+
+		return nil, fmt.Errorf("%w: role must be one of %s", ErrInvalidRole, strings.Join(models.UserRoleNames(), ", "))
+	}
+
 	var alreadyMember int64
 	if err := s.db.WithContext(ctx).Model(&models.User{}).
 		Where("email = ? AND organization_id = ?", email, orgID).Count(&alreadyMember).Error; err != nil {
@@ -51,7 +57,7 @@ func (s *UserService) Invite(ctx context.Context, orgID int64, email, name strin
 	var existing struct {
 		PasswordHash string `gorm:"column:password_hash"`
 	}
-	err := s.db.WithContext(ctx).Model(&models.User{}).Select("password_hash").Where("email = ?", email).Take(&existing).Error
+	err = s.db.WithContext(ctx).Model(&models.User{}).Select("password_hash").Where("email = ?", email).Take(&existing).Error
 
 	var passwordHash string
 	status := models.UserStatusActive
@@ -87,10 +93,19 @@ type UpdateUserInput struct {
 func (s *UserService) Update(ctx context.Context, orgID, id int64, in UpdateUserInput) (*models.User, error) {
 	updates := map[string]any{}
 	if in.Role != nil {
+		if !in.Role.Valid() {
+			return nil, fmt.Errorf("%w: role must be one of %s", ErrInvalidRole, strings.Join(models.UserRoleNames(), ", "))
+		}
 		updates["role"] = *in.Role
 	}
 	if in.Status != nil {
+		if !in.Status.Valid() {
+			return nil, fmt.Errorf("%w: status must be one of %s", ErrInvalidRole, strings.Join(models.UserStatusNames(), ", "))
+		}
 		updates["status"] = *in.Status
+	}
+	if len(updates) == 0 {
+		return s.get(ctx, orgID, id)
 	}
 
 	tx := s.db.WithContext(ctx).Model(&models.User{}).Where("organization_id = ? AND id = ?", orgID, id).Updates(updates)
@@ -101,12 +116,17 @@ func (s *UserService) Update(ctx context.Context, orgID, id int64, in UpdateUser
 		return nil, ErrUserNotFound
 	}
 
+	return s.get(ctx, orgID, id)
+}
+
+func (s *UserService) get(ctx context.Context, orgID, id int64) (*models.User, error) {
 	u := &models.User{}
-	if err := s.db.WithContext(ctx).Where("id = ?", id).First(u).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrUserNotFound
-		}
-		return nil, err
+	err := s.db.WithContext(ctx).Where("organization_id = ? AND id = ?", orgID, id).First(u).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("identity: get user: %w", err)
 	}
 	return u, nil
 }
@@ -144,9 +164,8 @@ func (s *UserService) ListRoles(ctx context.Context, orgID int64) ([]RoleSummary
 		counts[r.Role] = r.Count
 	}
 
-	all := []models.UserRole{models.RoleOwner, models.RoleAdmin, models.RoleDeveloper, models.RoleViewer}
-	out := make([]RoleSummary, 0, len(all))
-	for _, r := range all {
+	out := make([]RoleSummary, 0, len(models.AllUserRoles))
+	for _, r := range models.AllUserRoles {
 		out = append(out, RoleSummary{Role: r, MemberCount: counts[r]})
 	}
 	return out, nil

@@ -13,7 +13,8 @@ func registerAuthRoutes(r chi.Router, d Deps) {
 	r.Post("/auth/register", handleRegister(d))
 	r.Post("/auth/login", handleLogin(d))
 	r.Post("/auth/logout", handleLogout(d))
-	r.Get("/auth/me", identity.RequireSession(d.Sessions)(http.HandlerFunc(handleMe)).ServeHTTP)
+
+	r.With(identity.RequireSession(d.Sessions)).Get("/auth/me", handleMe(d))
 }
 
 func orgMembershipsJSON(memberships []identity.OrgMembership) []map[string]any {
@@ -37,19 +38,21 @@ func handleRegister(d Deps) http.HandlerFunc {
 			Password     string `json:"password"`
 			Organization string `json:"organization"`
 		}
-		if err := decodeJSON(r, &body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
+
 		result, err := d.Auth.Register(r.Context(), identity.RegisterInput{
 			Name: body.Name, Email: body.Email, Password: body.Password, Organization: body.Organization,
 		})
 		if errors.Is(err, identity.ErrEmailTaken) {
-			apiError(w, http.StatusConflict, "email_taken", "an account with this email already exists — log in instead")
+			apiError(w, r, http.StatusConflict, "email_taken",
+				"an account with this email already exists — log in instead")
 			return
 		}
 		if err != nil {
-			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{
@@ -66,23 +69,26 @@ func handleLogin(d Deps) http.HandlerFunc {
 			Password       string `json:"password"`
 			OrganizationID int64  `json:"organizationId"`
 		}
-		if err := decodeJSON(r, &body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
+
 		result, memberships, err := d.Auth.Login(r.Context(), body.Email, body.Password, body.OrganizationID)
-		if errors.Is(err, identity.ErrInvalidCredentials) {
-			apiError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
+		switch {
+		case errors.Is(err, identity.ErrInvalidCredentials):
+
+			apiError(w, r, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
+			return
+		case errors.Is(err, identity.ErrNotAMember):
+			apiError(w, r, http.StatusForbidden, "not_a_member",
+				"this account is not a member of that organization")
+			return
+		case err != nil:
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
-		if errors.Is(err, identity.ErrNotAMember) {
-			apiError(w, http.StatusForbidden, "not_a_member", "this account is not a member of that organization")
-			return
-		}
-		if err != nil {
-			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
+
 		if result == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"organizations": orgMembershipsJSON(memberships)})
 			return
@@ -96,15 +102,33 @@ func handleLogin(d Deps) http.HandlerFunc {
 
 func handleLogout(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := bearerToken(r)
-		if token != "" {
-			_ = d.Sessions.Revoke(r.Context(), token)
+
+		if token := bearerToken(r); token != "" {
+			if err := d.Sessions.Revoke(r.Context(), token); err != nil {
+				d.Logger.WarnContext(r.Context(), "logout: revoke session failed", errAttr(err))
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func handleMe(w http.ResponseWriter, r *http.Request) {
-	user, _ := identity.UserFromContext(r.Context())
-	writeJSON(w, http.StatusOK, user)
+func handleMe(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := identity.UserFromContext(r.Context())
+		if !ok {
+			apiError(w, r, http.StatusUnauthorized, "unauthorized", "no active session")
+			return
+		}
+
+		org, err := d.Organizations.Get(r.Context(), user.OrganizationID)
+		if err != nil {
+			handleServiceError(w, r, d.Logger, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"user": user,
+			"org":  org,
+		})
+	}
 }

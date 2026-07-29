@@ -7,33 +7,53 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"gridhook.dev/connector-backend/internal/config"
 )
 
 type DB struct {
 	*gorm.DB
 }
 
-func Connect(ctx context.Context, dsn string) (*DB, error) {
-	gdb, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+func Connect(ctx context.Context, cfg config.Database) (*DB, error) {
+	gdb, err := gorm.Open(postgres.Open(cfg.URL), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("db: connect: %w", err)
 	}
+
 	sqlDB, err := gdb.DB()
 	if err != nil {
 		return nil, fmt.Errorf("db: underlying sql.DB: %w", err)
 	}
-	if err := sqlDB.PingContext(ctx); err != nil {
+	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
+	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
+	sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
+
+	pingCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
+	defer cancel()
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("db: ping: %w", err)
 	}
 	return &DB{DB: gdb}, nil
 }
 
-func (d *DB) Close() {
+func (d *DB) Ping(ctx context.Context) error {
 	sqlDB, err := d.DB.DB()
 	if err != nil {
-		return
+		return fmt.Errorf("db: underlying sql.DB: %w", err)
 	}
-	sqlDB.Close()
+	return sqlDB.PingContext(ctx)
+}
+
+func (d *DB) Close() error {
+	sqlDB, err := d.DB.DB()
+	if err != nil {
+		return fmt.Errorf("db: underlying sql.DB: %w", err)
+	}
+	return sqlDB.Close()
 }

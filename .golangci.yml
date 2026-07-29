@@ -8,8 +8,35 @@ linters:
   enable:
     - bodyclose
     - sqlclosecheck
+    - rowserrcheck
+    - noctx
+
+    - errorlint
+    - nilerr
+    - contextcheck
+
+    - gosec
+
     - unconvert
     - misspell
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - predeclared
+    - reassign
+    - usestdlibvars
+    - wastedassign
+
+  settings:
+    gosec:
+      excludes:
+        - G107
+        - G404
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
   exclusions:
     generated: lax
     presets:
@@ -17,6 +44,12 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+          - errcheck
 
 formatters:
   enable:

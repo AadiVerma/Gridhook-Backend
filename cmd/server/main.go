@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,13 +19,19 @@ import (
 	appdb "gridhook.dev/connector-backend/internal/db"
 	"gridhook.dev/connector-backend/internal/dispatcher"
 	"gridhook.dev/connector-backend/internal/engines"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/identity"
+	"gridhook.dev/connector-backend/internal/observability"
 	"gridhook.dev/connector-backend/internal/parsers"
+	"gridhook.dev/connector-backend/internal/secrets"
 )
+
+const auditBufferSize = 4096
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("server: fatal", "error", err)
+
+		slog.Error("server: fatal", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
@@ -35,21 +42,38 @@ func run() error {
 		return err
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	database, err := appdb.Connect(ctx, cfg.DatabaseURL)
+	logger, err := observability.NewLogger(cfg.Observability)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	logger = logger.With(slog.String("service", "server"), slog.String("env", string(cfg.Env)))
 
-	sealer, err := loadSealer()
+	slog.SetDefault(logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	database, err := appdb.Connect(ctx, cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			logger.Error("server: closing database", slog.Any("error", err))
+		}
+	}()
+
+	sealer, err := newSealer(cfg, logger)
 	if err != nil {
 		return err
 	}
 
-	sessions := identity.NewSessionService(database.DB, cfg.SessionTTL)
+	upstream, err := httpx.New(upstreamConfig(cfg.Upstream))
+	if err != nil {
+		return err
+	}
+
+	sessions := identity.NewSessionService(database.DB, cfg.Session.TTL)
 	authSvc := identity.NewAuthService(database.DB, sessions)
 	users := identity.NewUserService(database.DB)
 	orgs := controlplane.NewOrganizationService(database.DB)
@@ -57,62 +81,108 @@ func run() error {
 	apis := controlplane.NewAPIService(database.DB, sealer)
 	tools := controlplane.NewToolService(database.DB)
 	groups := controlplane.NewGroupService(database.DB)
-	servers := controlplane.NewMCPServerService(database.DB, cfg.MCPPublicBaseURL)
+	servers := controlplane.NewMCPServerService(database.DB, cfg.MCP.PublicBaseURL)
 
-	auditLogger := audit.NewLogger(database.DB, 4096)
-	broker := auth.NewBroker(apis, auth.NewInMemoryTokenCache())
-	engineRegistry := engines.NewRegistry()
-	dispatch := dispatcher.New(tools, broker, engineRegistry, auditLogger)
+	auditRecorder := audit.NewRecorder(database.DB, logger, auditBufferSize)
+	auditReader := audit.NewReader(database.DB)
+	broker := auth.NewBroker(apis, auth.NewInMemoryTokenCache(), upstream)
+	dispatch := dispatcher.New(tools, broker, engines.NewRegistry(upstream), auditRecorder)
 
 	router := api.NewRouter(api.Deps{
-		Sessions:       sessions,
-		Auth:           authSvc,
-		Users:          users,
-		Organizations:  orgs,
-		Connectors:     connectors,
-		APIs:           apis,
-		Tools:          tools,
-		Groups:         groups,
-		Servers:        servers,
-		Audit:          auditLogger,
-		Dispatcher:     dispatch,
-		Parsers:        parsers.NewRegistry(),
-		InternalToken:  os.Getenv("INTERNAL_TOKEN"),
-		AllowedOrigins: cfg.CORSAllowedOrigins,
+		Logger:          logger,
+		MaxRequestBytes: cfg.HTTP.MaxRequestBytes,
+		InternalToken:   cfg.Security.InternalToken,
+		AllowedOrigins:  cfg.HTTP.AllowedOrigins,
+
+		Sessions:      sessions,
+		Auth:          authSvc,
+		Users:         users,
+		Organizations: orgs,
+		Connectors:    connectors,
+		APIs:          apis,
+		Tools:         tools,
+		Groups:        groups,
+		Servers:       servers,
+
+		AuditReader:   auditReader,
+		AuditRecorder: auditRecorder,
+		Dispatcher:    dispatch,
+		Parsers:       parsers.NewRegistry(),
+		Upstream:      upstream,
+		Ready:         database.Ping,
 	})
 
 	httpServer := &http.Server{
-		Addr:              cfg.HTTPAddr,
+		Addr:              cfg.HTTP.Addr,
 		Handler:           router,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTP.ReadTimeout,
+		WriteTimeout:      cfg.HTTP.WriteTimeout,
+		IdleTimeout:       cfg.HTTP.IdleTimeout,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
-	errCh := make(chan error, 1)
+	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("server: listening", "addr", cfg.HTTPAddr)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		logger.Info("server: listening", slog.String("addr", cfg.HTTP.Addr))
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 		}
+		close(serveErr)
 	}()
 
 	select {
-	case <-ctx.Done():
-		slog.Info("server: shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
-	case err := <-errCh:
+	case err := <-serveErr:
 		return err
+	case <-ctx.Done():
+		logger.Info("server: shutdown signal received")
 	}
+
+	return shutdown(httpServer, auditRecorder, logger, cfg.HTTP.ShutdownTimeout)
 }
 
-func loadSealer() (appdb.Sealer, error) {
-	raw := os.Getenv("KMS_DATA_KEY")
-	if raw == "" {
-		slog.Warn("server: KMS_DATA_KEY not set, using an insecure development-only key")
-		devKey := sha256.Sum256([]byte("gridhook-dev-only-key-do-not-use-in-prod"))
-		return appdb.NewAESSealer(devKey[:])
+func shutdown(server *http.Server, recorder *audit.Recorder, logger *slog.Logger, timeout time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), timeout)
+	defer cancel()
+
+	var shutdownErr error
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("server: graceful shutdown failed", slog.Any("error", err))
+		shutdownErr = err
 	}
-	key := sha256.Sum256([]byte(raw))
-	return appdb.NewAESSealer(key[:])
+	if err := recorder.Close(shutdownCtx); err != nil {
+		logger.Error("server: audit recorder did not drain", slog.Any("error", err))
+		if shutdownErr == nil {
+			shutdownErr = err
+		}
+	}
+
+	logger.Info("server: stopped")
+	return shutdownErr
+}
+
+func upstreamConfig(cfg config.Upstream) httpx.Config {
+	out := httpx.DefaultConfig()
+	out.Timeout = cfg.Timeout
+	out.MaxResponseBytes = cfg.MaxResponseBytes
+	out.MaxRetries = cfg.MaxRetries
+	out.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
+	out.AllowPrivateNetworks = cfg.AllowPrivateNetworks
+	return out
+}
+
+func newSealer(cfg config.Config, logger *slog.Logger) (secrets.Sealer, error) {
+	if cfg.Security.DataKey != "" {
+		if cfg.Security.KMSKeyID != "" {
+			logger.Info("server: credential sealer initialised", slog.String("kms_key_id", cfg.Security.KMSKeyID))
+		}
+		return secrets.NewAESSealer(secrets.DeriveKey(cfg.Security.DataKey))
+	}
+
+	if cfg.IsProduction() {
+		return nil, fmt.Errorf("server: KMS_DATA_KEY is required in production")
+	}
+	logger.Warn("server: KMS_DATA_KEY not set — using an insecure development-only key; " +
+		"credentials sealed with it are readable by anyone with the source")
+	return secrets.NewAESSealer(secrets.DeriveKey("gridhook-dev-only-key-do-not-use-in-prod"))
 }

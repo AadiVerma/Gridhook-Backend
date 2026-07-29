@@ -4,26 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"gridhook.dev/connector-backend/internal/models"
+	"gridhook.dev/connector-backend/internal/slug"
 )
 
-var slugNonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
-
-func slugify(name string) string {
-	s := slugNonAlnum.ReplaceAllString(strings.ToLower(strings.TrimSpace(name)), "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "module"
-	}
-	return s
-}
+func slugify(name string) string { return slug.Make(name) }
 
 type GroupService struct {
 	db *gorm.DB
@@ -40,10 +29,10 @@ type CreateGroupInput struct {
 }
 
 func (s *GroupService) Create(ctx context.Context, orgID int64, in CreateGroupInput) (*models.ToolGroup, error) {
-	slug := in.Slug
-	if slug == "" {
+	groupSlug := in.Slug
+	if groupSlug == "" {
 		var err error
-		slug, err = s.uniqueSlug(ctx, orgID, in.Name)
+		groupSlug, err = s.uniqueSlug(ctx, orgID, in.Name)
 		if err != nil {
 			return nil, fmt.Errorf("controlplane: create tool_group: generate slug: %w", err)
 		}
@@ -51,11 +40,11 @@ func (s *GroupService) Create(ctx context.Context, orgID int64, in CreateGroupIn
 	g := &models.ToolGroup{
 		OrganizationID: orgID,
 		Name:           in.Name,
-		Slug:           slug,
+		Slug:           groupSlug,
 		Description:    in.Description,
 		Kind:           models.GroupManual,
 	}
-	if err := s.db.WithContext(ctx).Omit("SyncedModuleKey").Create(g).Error; err != nil {
+	if err := s.db.WithContext(ctx).Create(g).Error; err != nil {
 		return nil, fmt.Errorf("controlplane: create tool_group: %w", err)
 	}
 	return g, nil
@@ -63,31 +52,30 @@ func (s *GroupService) Create(ctx context.Context, orgID int64, in CreateGroupIn
 
 func (s *GroupService) uniqueSlug(ctx context.Context, orgID int64, name string) (string, error) {
 	base := slugify(name)
-	slug := base
+	candidate := base
 	for attempt := 2; ; attempt++ {
 		var count int64
 		if err := s.db.WithContext(ctx).Model(&models.ToolGroup{}).
-			Where("organization_id = ? AND slug = ?", orgID, slug).Count(&count).Error; err != nil {
+			Where("organization_id = ? AND slug = ?", orgID, candidate).Count(&count).Error; err != nil {
 			return "", err
 		}
 		if count == 0 {
-			return slug, nil
+			return candidate, nil
 		}
-		slug = fmt.Sprintf("%s-%d", base, attempt)
+		candidate = fmt.Sprintf("%s-%d", base, attempt)
 	}
 }
 
 func (s *GroupService) List(ctx context.Context, orgID int64) ([]*models.ToolGroup, error) {
 	var rows []struct {
-		ID              int64
-		Name            string
-		Slug            string
-		Description     string
-		Kind            models.ToolGroupKind
-		SyncedModuleKey string
-		CreatedAt       time.Time
-		UpdatedAt       time.Time
-		ToolCount       int64
+		ID          int64
+		Name        string
+		Slug        string
+		Description string
+		Kind        models.ToolGroupKind
+		CreatedAt   time.Time
+		UpdatedAt   time.Time
+		ToolCount   int64
 	}
 	err := s.db.WithContext(ctx).Model(&models.ToolGroup{}).
 		Select("tool_groups.*, count(t.id) AS tool_count").
@@ -103,7 +91,7 @@ func (s *GroupService) List(ctx context.Context, orgID int64) ([]*models.ToolGro
 	for i, r := range rows {
 		out[i] = &models.ToolGroup{
 			OrganizationID: orgID, ID: r.ID, Name: r.Name, Slug: r.Slug, Description: r.Description,
-			Kind: r.Kind, SyncedModuleKey: r.SyncedModuleKey, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+			Kind: r.Kind, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 			ToolCount: int(r.ToolCount),
 		}
 	}
@@ -130,75 +118,109 @@ func (s *GroupService) Delete(ctx context.Context, orgID, id int64) error {
 	return nil
 }
 
-func (s *GroupService) AssignTools(ctx context.Context, groupID int64, toolIDs []int64) error {
-	err := s.db.WithContext(ctx).Model(&models.MCPTool{}).Where("id IN ?", toolIDs).
-		Updates(map[string]any{"group_id": groupID, "updated_at": gorm.Expr("now()")}).Error
-	if err != nil {
-		return fmt.Errorf("controlplane: assign tools to group: %w", err)
+func (s *GroupService) AssignTools(ctx context.Context, orgID, groupID int64, toolIDs []int64) error {
+	if len(toolIDs) == 0 {
+		return nil
 	}
-	return nil
-}
-
-func (s *GroupService) SetServerGroups(ctx context.Context, mcpServerID int64, groupIDs []int64) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("mcp_server_id = ?", mcpServerID).Delete(&models.MCPServerToolGroup{}).Error; err != nil {
-			return fmt.Errorf("controlplane: set server groups: clear: %w", err)
+		var groups int64
+		if err := tx.Model(&models.ToolGroup{}).
+			Where("id = ? AND organization_id = ?", groupID, orgID).Count(&groups).Error; err != nil {
+			return fmt.Errorf("controlplane: assign tools: verify group: %w", err)
 		}
-		for _, groupID := range groupIDs {
-			row := models.MCPServerToolGroup{MCPServerID: mcpServerID, ToolGroupID: groupID}
-			if err := tx.Create(&row).Error; err != nil {
-				return fmt.Errorf("controlplane: set server groups: insert: %w", err)
-			}
+		if groups == 0 {
+			return ErrNotFound
+		}
+
+		res := tx.Model(&models.MCPTool{}).
+			Where("id IN ?", toolIDs).
+			Where(`connector_api_id IN (
+				SELECT a.id FROM connector_apis a
+				JOIN connectors c ON c.id = a.connector_id
+				WHERE c.organization_id = ?)`, orgID).
+			Updates(map[string]any{"group_id": groupID, "updated_at": gorm.Expr("now()")})
+		if res.Error != nil {
+			return fmt.Errorf("controlplane: assign tools to group: %w", res.Error)
+		}
+		if res.RowsAffected != int64(len(toolIDs)) {
+			return fmt.Errorf("%w: one or more tools do not exist in this organization", ErrNotFound)
 		}
 		return nil
 	})
 }
 
-func (s *GroupService) GroupsForConnector(ctx context.Context, connectorID int64) ([]int64, error) {
+func (s *GroupService) SetServerGroups(ctx context.Context, orgID, mcpServerID int64, groupIDs []int64) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var servers int64
+		if err := tx.Model(&models.MCPServer{}).
+			Where("id = ? AND organization_id = ?", mcpServerID, orgID).Count(&servers).Error; err != nil {
+			return fmt.Errorf("controlplane: set server groups: verify server: %w", err)
+		}
+		if servers == 0 {
+			return ErrNotFound
+		}
+
+		if len(groupIDs) > 0 {
+			var owned int64
+			if err := tx.Model(&models.ToolGroup{}).
+				Where("id IN ? AND organization_id = ?", groupIDs, orgID).Count(&owned).Error; err != nil {
+				return fmt.Errorf("controlplane: set server groups: verify groups: %w", err)
+			}
+			if owned != int64(len(uniqueIDs(groupIDs))) {
+				return fmt.Errorf("%w: one or more tool groups do not exist in this organization", ErrNotFound)
+			}
+		}
+
+		if err := tx.Where("mcp_server_id = ?", mcpServerID).Delete(&models.MCPServerToolGroup{}).Error; err != nil {
+			return fmt.Errorf("controlplane: set server groups: clear: %w", err)
+		}
+		if len(groupIDs) == 0 {
+			return nil
+		}
+
+		rows := make([]models.MCPServerToolGroup, 0, len(groupIDs))
+		for _, groupID := range uniqueIDs(groupIDs) {
+			rows = append(rows, models.MCPServerToolGroup{MCPServerID: mcpServerID, ToolGroupID: groupID})
+		}
+
+		if err := tx.Create(&rows).Error; err != nil {
+			return fmt.Errorf("controlplane: set server groups: insert: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *GroupService) GroupsForConnector(ctx context.Context, orgID, connectorID int64) ([]int64, error) {
 	var ids []int64
 	err := s.db.WithContext(ctx).Raw(`
 		SELECT DISTINCT group_id FROM (
-			SELECT a.group_id FROM connector_apis a WHERE a.connector_id = ? AND a.group_id IS NOT NULL
+			SELECT a.group_id
+			FROM connector_apis a
+			JOIN connectors c ON c.id = a.connector_id
+			WHERE a.connector_id = ? AND c.organization_id = ? AND a.group_id IS NOT NULL
 			UNION
-			SELECT t.group_id FROM mcp_tools t JOIN connector_apis a2 ON a2.id = t.connector_api_id
-			WHERE a2.connector_id = ? AND t.group_id IS NOT NULL
+			SELECT t.group_id
+			FROM mcp_tools t
+			JOIN connector_apis a2 ON a2.id = t.connector_api_id
+			JOIN connectors c2 ON c2.id = a2.connector_id
+			WHERE a2.connector_id = ? AND c2.organization_id = ? AND t.group_id IS NOT NULL
 		) modules
-	`, connectorID, connectorID).Scan(&ids).Error
+	`, connectorID, orgID, connectorID, orgID).Scan(&ids).Error
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: groups for connector: %w", err)
 	}
 	return ids, nil
 }
 
-func (s *GroupService) SyncModules(ctx context.Context, modules []models.Module) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, m := range modules {
-			row := models.Module{Key: m.Key, Label: m.Label, SyncedAt: time.Now()}
-			err := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "key"}},
-				DoUpdates: clause.AssignmentColumns([]string{"label", "synced_at"}),
-			}).Create(&row).Error
-			if err != nil {
-				return fmt.Errorf("controlplane: sync modules: upsert %q: %w", m.Key, err)
-			}
+func uniqueIDs(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
 		}
-		return nil
-	})
-}
-
-func (s *GroupService) EnsureSyncedGroup(ctx context.Context, orgID int64, moduleKey, label string) (*models.ToolGroup, error) {
-	g := &models.ToolGroup{
-		OrganizationID: orgID, Name: label, Slug: moduleKey, Kind: models.GroupSynced, SyncedModuleKey: moduleKey,
+		seen[id] = struct{}{}
+		out = append(out, id)
 	}
-	err := s.db.WithContext(ctx).Clauses(
-		clause.OnConflict{
-			Columns:   []clause.Column{{Name: "organization_id"}, {Name: "slug"}},
-			DoUpdates: clause.AssignmentColumns([]string{"name", "updated_at"}),
-		},
-		clause.Returning{},
-	).Create(g).Error
-	if err != nil {
-		return nil, fmt.Errorf("controlplane: ensure synced group: %w", err)
-	}
-	return g, nil
+	return out
 }

@@ -4,22 +4,23 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"gridhook.dev/connector-backend/internal/auth/schemes"
+	"gridhook.dev/connector-backend/internal/httpx"
 	"gridhook.dev/connector-backend/internal/models"
 )
 
 type SoapEngine struct {
-	Client *http.Client
+	client *httpx.Client
 }
 
-func NewSoapEngine() *SoapEngine {
-	return &SoapEngine{Client: &http.Client{Timeout: 30 * time.Second}}
+func NewSoapEngine(client *httpx.Client) *SoapEngine {
+	return &SoapEngine{client: client}
 }
+
+var _ Engine = (*SoapEngine)(nil)
 
 func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool *models.MCPTool, creds schemes.Credentials, input map[string]any) (*Result, error) {
 	template, _ := tool.EndpointMapping["envelopeTemplate"].(string)
@@ -28,17 +29,12 @@ func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 	}
 	soapAction, _ := tool.EndpointMapping["soapAction"].(string)
 
-	envelope := template
-	for key, val := range input {
-		var escaped strings.Builder
-		if err := xml.EscapeText(&escaped, []byte(fmt.Sprint(val))); err != nil {
-			return nil, fmt.Errorf("engines: soap: escape param %q: %w", key, err)
-		}
-		envelope = strings.ReplaceAll(envelope, "{{"+key+"}}", escaped.String())
-		envelope = strings.ReplaceAll(envelope, "{"+key+"}", escaped.String())
+	envelope, err := renderEnvelope(template, input)
+	if err != nil {
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.BaseURL, strings.NewReader(envelope))
+	req, err := httpx.NewRequest(ctx, http.MethodPost, api.BaseURL, []byte(envelope))
 	if err != nil {
 		return nil, fmt.Errorf("engines: soap: build request: %w", err)
 	}
@@ -49,24 +45,31 @@ func (e *SoapEngine) Execute(ctx context.Context, api *models.ConnectorAPI, tool
 	for k, v := range staticHeadersFrom(tool.EndpointMapping) {
 		req.Header.Set(k, v)
 	}
-	for k, v := range creds.Headers {
-		req.Header.Set(k, v)
-	}
+	applyCredentials(req, creds)
 
-	resp, err := e.Client.Do(req)
+	resp, err := e.client.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("engines: soap: %w", err)
 	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("engines: soap: read response: %w", err)
-	}
-
 	return &Result{
 		StatusCode: resp.StatusCode,
 		Headers:    flattenHeaders(resp.Header),
-		Body:       string(raw),
+
+		Body: string(resp.Body),
 	}, nil
+}
+
+func renderEnvelope(template string, input map[string]any) (string, error) {
+	envelope := template
+	for key, val := range input {
+		var escaped strings.Builder
+		if err := xml.EscapeText(&escaped, []byte(fmt.Sprint(val))); err != nil {
+			return "", fmt.Errorf("engines: soap: escape param %q: %w", key, err)
+		}
+		value := escaped.String()
+
+		envelope = strings.ReplaceAll(envelope, "{{"+key+"}}", value)
+		envelope = strings.ReplaceAll(envelope, "{"+key+"}", value)
+	}
+	return envelope, nil
 }

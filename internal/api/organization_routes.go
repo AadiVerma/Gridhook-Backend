@@ -6,33 +6,32 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"gridhook.dev/connector-backend/internal/controlplane"
-	"gridhook.dev/connector-backend/internal/identity"
 )
 
 func registerOrganizationRoutes(r chi.Router, d Deps) {
-	r.Get("/organizations/{id}", func(w http.ResponseWriter, r *http.Request) {
-		reqID, ok := intIDParam(w, r, "id")
-		if !ok {
-			return
-		}
-		id, ok := requireOwnOrg(w, r, reqID)
+	r.Get("/organizations/{id}", handleGetOrganization(d))
+	r.Patch("/organizations/{id}", handleUpdateOrganization(d))
+	r.Delete("/organizations/{id}", handleDeleteOrganization(d))
+}
+
+func handleGetOrganization(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireOwnOrgParam(w, r)
 		if !ok {
 			return
 		}
 		org, err := d.Organizations.Get(r.Context(), id)
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, org)
-	})
+	}
+}
 
-	r.Patch("/organizations/{id}", func(w http.ResponseWriter, r *http.Request) {
-		reqID, ok := intIDParam(w, r, "id")
-		if !ok {
-			return
-		}
-		id, ok := requireOwnOrg(w, r, reqID)
+func handleUpdateOrganization(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireOwnOrgParam(w, r)
 		if !ok {
 			return
 		}
@@ -40,48 +39,44 @@ func registerOrganizationRoutes(r chi.Router, d Deps) {
 			Name     *string `json:"name"`
 			Timezone *string `json:"timezone"`
 		}
-		if err := decodeJSON(r, &body); err != nil {
-			apiError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		if err := decodeJSON(w, r, d.MaxRequestBytes, &body); err != nil {
+			apiError(w, r, http.StatusBadRequest, "invalid_body", err.Error())
 			return
 		}
-		org, err := d.Organizations.Update(r.Context(), id, controlplane.UpdateOrganizationInput{Name: body.Name, Timezone: body.Timezone})
+		org, err := d.Organizations.Update(r.Context(), id, controlplane.UpdateOrganizationInput{
+			Name: body.Name, Timezone: body.Timezone,
+		})
 		if err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, org)
-	})
+	}
+}
 
-	r.Delete("/organizations/{id}", func(w http.ResponseWriter, r *http.Request) {
-		reqID, ok := intIDParam(w, r, "id")
-		if !ok {
-			return
-		}
-		id, ok := requireOwnOrg(w, r, reqID)
+func handleDeleteOrganization(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := requireOwnOrgParam(w, r)
 		if !ok {
 			return
 		}
 		if err := d.Organizations.Delete(r.Context(), id); err != nil {
-			handleServiceError(w, err)
+			handleServiceError(w, r, d.Logger, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}
 }
 
-func requireOwnOrg(w http.ResponseWriter, r *http.Request, requestedID int64) (int64, bool) {
+func requireOwnOrgParam(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	requestedID, ok := intIDParam(w, r, "id")
+	if !ok {
+		return 0, false
+	}
 	orgID := orgIDFromContext(r)
-	if requestedID != orgID {
-		apiError(w, http.StatusForbidden, "forbidden", "cannot access another organization")
+	if orgID == 0 || requestedID != orgID {
+		apiError(w, r, http.StatusForbidden, "forbidden", "cannot access another organization")
 		return 0, false
 	}
 	return orgID, true
-}
-
-func orgIDFromContext(r *http.Request) int64 {
-	user, ok := identity.UserFromContext(r.Context())
-	if !ok {
-		return 0
-	}
-	return user.OrganizationID
 }

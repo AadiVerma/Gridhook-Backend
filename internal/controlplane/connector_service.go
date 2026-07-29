@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 
 	"gridhook.dev/connector-backend/internal/models"
 )
-
-var ErrNotFound = errors.New("controlplane: not found")
-var ErrValidation = errors.New("controlplane: validation failed")
 
 type ConnectorService struct {
 	db *gorm.DB
@@ -75,6 +73,15 @@ const connectorSelectSQL = `
 	       ) modules) AS module_count
 	FROM connectors c
 	LEFT JOIN connector_apis a ON a.connector_id = c.id
+`
+
+const connectorFilterSQL = `
+	WHERE c.organization_id = ?
+	  AND (? = '' OR c.name ILIKE '%' || ? || '%')
+	  AND (? = '' OR c.status = NULLIF(?, '')::connector_status)
+	  AND (? = '' OR EXISTS (
+	        SELECT 1 FROM connector_apis a2
+	        WHERE a2.connector_id = c.id AND a2.engine_type = NULLIF(?, '')::engine_type))
 `
 
 func (r connectorRow) toModel(orgID int64) *models.Connector {
@@ -170,16 +177,14 @@ func (s *ConnectorService) List(ctx context.Context, orgID int64, f ListConnecto
 		f.PageSize = 50
 	}
 
+	args := []any{orgID, f.Query, f.Query, f.Status, f.Status, f.Type, f.Type}
+
 	var rows []connectorRow
-	err := s.db.WithContext(ctx).Raw(connectorSelectSQL+`
-		WHERE c.organization_id = ?
-		  AND (? = '' OR c.name ILIKE '%' || ? || '%')
-		  AND (? = '' OR c.status = NULLIF(?, '')::connector_status)
-		  AND (? = '' OR EXISTS (SELECT 1 FROM connector_apis a2 WHERE a2.connector_id = c.id AND a2.engine_type = NULLIF(?, '')::engine_type))
+	err := s.db.WithContext(ctx).Raw(connectorSelectSQL+connectorFilterSQL+`
 		GROUP BY c.id
 		ORDER BY c.created_at DESC
 		LIMIT ? OFFSET ?
-	`, orgID, f.Query, f.Query, f.Status, f.Status, f.Type, f.Type, f.PageSize, (f.Page-1)*f.PageSize).Scan(&rows).Error
+	`, append(args, f.PageSize, (f.Page-1)*f.PageSize)...).Scan(&rows).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("controlplane: list connectors: %w", err)
 	}
@@ -193,7 +198,10 @@ func (s *ConnectorService) List(ctx context.Context, orgID int64, f ListConnecto
 	}
 
 	var total int64
-	if err := s.db.WithContext(ctx).Model(&models.Connector{}).Where("organization_id = ?", orgID).Count(&total).Error; err != nil {
+	err = s.db.WithContext(ctx).Raw(`
+		SELECT count(DISTINCT c.id) FROM connectors c
+	`+connectorFilterSQL, args...).Scan(&total).Error
+	if err != nil {
 		return nil, 0, fmt.Errorf("controlplane: count connectors: %w", err)
 	}
 	return out, int(total), nil
@@ -284,24 +292,36 @@ func (s *ConnectorService) Delete(ctx context.Context, orgID, id int64) error {
 	return nil
 }
 
-func (s *ConnectorService) HealthCheck(ctx context.Context, orgID, id int64, ping func(baseURL string) error) (*models.Connector, error) {
+type Pinger func(ctx context.Context, baseURL string) error
+
+const healthCheckConcurrency = 8
+
+func (s *ConnectorService) HealthCheck(ctx context.Context, orgID, id int64, ping Pinger) (*models.Connector, error) {
+
 	var urls []string
-	if err := s.db.WithContext(ctx).Model(&models.ConnectorAPI{}).
+	err := s.db.WithContext(ctx).Model(&models.ConnectorAPI{}).
 		Where("connector_id = ? AND is_active", id).
-		Pluck("base_url", &urls).Error; err != nil {
+		Where("connector_id IN (SELECT id FROM connectors WHERE organization_id = ?)", orgID).
+		Pluck("base_url", &urls).Error
+	if err != nil {
 		return nil, fmt.Errorf("controlplane: health check: list apis: %w", err)
 	}
 
 	status := models.ConnectorActive
-	for _, u := range urls {
-		if err := ping(u); err != nil {
+	if len(urls) > 0 {
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.SetLimit(healthCheckConcurrency)
+		for _, u := range urls {
+			group.Go(func() error { return ping(groupCtx, u) })
+		}
+
+		if err := group.Wait(); err != nil {
 			status = models.ConnectorError
-			break
 		}
 	}
 
 	now := time.Now()
-	err := s.db.WithContext(ctx).Model(&models.Connector{}).Where("organization_id = ? AND id = ?", orgID, id).
+	err = s.db.WithContext(ctx).Model(&models.Connector{}).Where("organization_id = ? AND id = ?", orgID, id).
 		Updates(map[string]any{"status": status, "last_sync_at": now, "updated_at": gorm.Expr("now()")}).Error
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: health check: update: %w", err)

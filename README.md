@@ -51,9 +51,9 @@ outcome — success or failure — lands in the audit log. The agent never sees 
 
 |  |  |
 |---|---|
-| 🔐 **Credentials never touch disk in plaintext** | `client_secret`, `bearer_token`, `api_key_value`, `basic_password` are sealed with AES-256-GCM before they hit Postgres, and opened only in memory when a call is dispatched. |
+| 🔐 **Credentials never touch disk in plaintext** | `client_secret`, `bearer_token`, `api_key_value`, `basic_password` are sealed with AES-256-GCM before they hit Postgres, opened only in memory at dispatch time, stripped from requests that redirect off-host, and redacted from errors before they reach a response or the audit log. |
 | 🧩 **Three protocol engines, one interface** | REST, SOAP, and GraphQL connectors are all just "tools" to the dispatcher — the engine differences are isolated behind one small interface. |
-| 🏢 **Multi-tenant from day one** | `Company → Tenant → Organization → User`, with role-based access (`owner`/`admin`/`developer`/`viewer`) and org-scoped everything. |
+| 🏢 **Multi-tenant from day one** | `Company → Tenant → Organization → User`. Every repository method takes an organization ID and applies it as a SQL predicate — tenancy is enforced in the statement, not by the caller. |
 | 📦 **Import instead of hand-write** | Drop in an OpenAPI spec, Postman collection, WSDL, or a `curl` snippet — tools get generated, not typed. |
 | 🗂️ **Tool Groups, not one giant tool list** | Group tools by connector, by team, or by whatever makes sense — an MCP server only ever exposes the groups assigned to it. |
 | 🕵️ **An audit trail that's actually queryable** | Every dispatch — status, HTTP code, duration, input, output — is written asynchronously so it never slows down the live call. |
@@ -68,11 +68,15 @@ cd Gridhook-Backend
 
 cp .env.example .env        # then edit DATABASE_URL etc.
 
-psql "$DATABASE_URL" -f internal/db/migrations/0001_init.up.sql
+make migrate                 # applies every migration in order
 
-go run ./cmd/server          # admin API + MCP runtime, one process
-go run ./cmd/worker          # background: session sweep, health checks
+make run-server              # admin API + MCP runtime, one process
+make run-worker              # background: session sweep
 ```
+
+Health probes live at `/healthz` (liveness) and `/readyz` (readiness — checks
+the database). Point a supervisor at the first and a load balancer at the
+second; conflating them turns a database blip into a restart loop.
 
 The server reads `.env` automatically (via `godotenv`) — no shell exports required for local dev.
 
@@ -82,22 +86,58 @@ The server reads `.env` automatically (via `godotenv`) — no shell exports requ
 
 ```
 cmd/
-  server/          admin API + MCP runtime (one process)
-  worker/           background jobs: session sweep, connector health checks
+  server/           admin API + MCP runtime (one process)
+  worker/           background jobs: session sweep
 
 internal/
-  config/           env + .env loading
-  db/               Postgres connection (GORM) + the Sealer encryption boundary
   models/           domain types — Connector, MCPTool, ToolGroup, ToolInvocation, ...
+  config/           the only package that reads the environment; typed + validated
+  secrets/          AES-256-GCM sealer and credential redaction helpers
+  slug/             URL-safe identifier generation
+
+  db/               Postgres connection and pool tuning
+  httpx/            shared outbound client — retry, SSRF guard, size caps, redirects
+  observability/    structured logging, request correlation, panic recovery
+
   identity/         auth, sessions, users & roles
-  controlplane/     CRUD for connectors, connector APIs, tool groups, tools, MCP servers
-  auth/             pluggable credential schemes (OAuth2, Bearer, API key, Basic) + token cache
+  controlplane/     org-scoped repositories for connectors, APIs, tool groups, tools, servers
+  parsers/          OpenAPI, Postman, WSDL, curl, GraphQL SDL → connector import
+
+  auth/             credential broker + token cache
+  auth/schemes/     one strategy per credential style (OAuth2, Bearer, API key, Basic)
   engines/          REST, SOAP, GraphQL execution engines
-  dispatcher/       resolves a tool call → engine → shapes the response
-  parsers/          OpenAPI, Postman, WSDL, curl → connector import
-  audit/            append-only tool_invocations log
-  api/              chi routes for the admin surface
+  dispatcher/       resolves a tool call → credentials → engine → audit record
+
+  audit/            append-only tool_invocations log (Recorder writes, Reader queries)
+  api/              chi routes, DTOs and error mapping
 ```
+
+`internal/models` imports nothing; `cmd/` is the only place that constructs
+dependencies. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full dependency
+graph, the security model, and known gaps.
+
+<br/>
+
+## Development
+
+```bash
+make dev          # live reload (air) — rebuilds and restarts on save
+make check        # vet + lint + race tests — the gate a change must pass
+make test-race    # tests under the race detector
+make cover        # coverage summary
+make build        # binaries into bin/
+make migrate      # apply migrations (needs DATABASE_URL)
+make help         # everything else
+```
+
+`make dev` is the Go equivalent of nodemon. It watches `.go` files and `.env`,
+and reloads with **SIGINT rather than SIGKILL** so the graceful shutdown path
+runs on every save — otherwise each reload would silently discard whatever was
+still queued in the audit buffer.
+
+Development logs use a compact colourised format; production defaults to JSON.
+Set `LOG_FORMAT=json` locally to see exactly what a log shipper will receive,
+or `LOG_COLOR=never` (or `NO_COLOR=1`) to strip escape codes.
 
 <br/>
 

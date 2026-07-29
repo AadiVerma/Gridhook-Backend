@@ -22,29 +22,21 @@ const (
 type ToolGroupKind string
 
 const (
+	// GroupManual is the only kind the application can produce. The
+	// tool_group_kind enum still carries 'synced', but the module-sync feature
+	// it belonged to was removed in migration 0004 — see that file.
 	GroupManual ToolGroupKind = "manual"
-	GroupSynced ToolGroupKind = "synced"
 )
 
-type Module struct {
-	ID       int64     `json:"id" gorm:"column:id;primaryKey"`
-	Key      string    `json:"key" gorm:"column:key"`
-	Label    string    `json:"label" gorm:"column:label"`
-	SyncedAt time.Time `json:"syncedAt" gorm:"column:synced_at"`
-}
-
-func (Module) TableName() string { return "modules" }
-
 type ToolGroup struct {
-	ID              int64         `json:"id" gorm:"column:id;primaryKey"`
-	OrganizationID  int64         `json:"organizationId" gorm:"column:organization_id"`
-	Name            string        `json:"name" gorm:"column:name"`
-	Slug            string        `json:"slug" gorm:"column:slug"`
-	Description     string        `json:"description" gorm:"column:description"`
-	Kind            ToolGroupKind `json:"kind" gorm:"column:kind"`
-	SyncedModuleKey string        `json:"syncedModuleKey,omitempty" gorm:"column:synced_module_key"`
-	CreatedAt       time.Time     `json:"createdAt" gorm:"column:created_at"`
-	UpdatedAt       time.Time     `json:"updatedAt" gorm:"column:updated_at"`
+	ID             int64         `json:"id" gorm:"column:id;primaryKey"`
+	OrganizationID int64         `json:"organizationId" gorm:"column:organization_id"`
+	Name           string        `json:"name" gorm:"column:name"`
+	Slug           string        `json:"slug" gorm:"column:slug"`
+	Description    string        `json:"description" gorm:"column:description"`
+	Kind           ToolGroupKind `json:"kind" gorm:"column:kind"`
+	CreatedAt      time.Time     `json:"createdAt" gorm:"column:created_at"`
+	UpdatedAt      time.Time     `json:"updatedAt" gorm:"column:updated_at"`
 
 	ToolCount int `json:"toolCount,omitempty" gorm:"-"`
 }

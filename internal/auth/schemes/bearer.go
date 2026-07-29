@@ -11,7 +11,7 @@ type BearerScheme struct{}
 
 func (BearerScheme) Resolve(_ context.Context, creds *models.ConnectorCredentials) (Credentials, error) {
 	if creds.BearerToken == "" {
-		return Credentials{}, fmt.Errorf("schemes: bearer credentials missing token")
+		return Credentials{}, fmt.Errorf("%w: bearer needs bearer_token", ErrIncompleteCredentials)
 	}
 	return Credentials{
 		Headers: map[string]string{"Authorization": "Bearer " + creds.BearerToken},

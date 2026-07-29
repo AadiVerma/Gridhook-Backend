@@ -76,9 +76,16 @@ func listInvocations(ctx context.Context, gdb *gorm.DB, orgID int64, f ListFilte
 
 func getInvocation(ctx context.Context, gdb *gorm.DB, orgID, id int64) (*models.ToolInvocation, error) {
 	inv := &models.ToolInvocation{}
-	err := gdb.WithContext(ctx).Select(invocationSelect).Where("organization_id = ? AND id = ?", orgID, id).First(inv).Error
+	err := gdb.WithContext(ctx).Model(&models.ToolInvocation{}).
+		Select(invocationSelect).
+		Where("organization_id = ? AND id = ?", orgID, id).
+		First(inv).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("audit: invocation %d not found", id)
+
+		return nil, fmt.Errorf("audit: invocation %d: %w", id, ErrNotFound)
 	}
-	return inv, err
+	if err != nil {
+		return nil, fmt.Errorf("audit: get invocation: %w", err)
+	}
+	return inv, nil
 }
