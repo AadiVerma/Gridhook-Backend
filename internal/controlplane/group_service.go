@@ -190,7 +190,24 @@ func (s *GroupService) SetServerGroups(ctx context.Context, orgID, mcpServerID i
 	})
 }
 
+// GroupsForConnector lists the tool groups reachable from a connector.
+//
+// It asserts ownership first rather than relying on the org predicate inside the
+// query below. Both filter correctly, but a filtered-to-nothing query is
+// indistinguishable from "this connector genuinely has no groups" -- and the
+// caller that matters, PUT /mcp-servers/{id}/connectors, treats an empty result
+// as "detach everything". A typo'd or cross-tenant id silently wiped a server's
+// entire tool set and reported 200.
 func (s *GroupService) GroupsForConnector(ctx context.Context, orgID, connectorID int64) ([]int64, error) {
+	var owned int64
+	if err := s.db.WithContext(ctx).Model(&models.Connector{}).
+		Where("id = ? AND organization_id = ?", connectorID, orgID).Count(&owned).Error; err != nil {
+		return nil, fmt.Errorf("controlplane: groups for connector: verify connector: %w", err)
+	}
+	if owned == 0 {
+		return nil, ErrNotFound
+	}
+
 	var ids []int64
 	err := s.db.WithContext(ctx).Raw(`
 		SELECT DISTINCT group_id FROM (

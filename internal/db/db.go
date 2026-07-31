@@ -18,6 +18,12 @@ type DB struct {
 func Connect(ctx context.Context, cfg config.Database) (*DB, error) {
 	gdb, err := gorm.Open(postgres.Open(cfg.URL), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
+
+		// Turns a raw pg 23505/23503 into gorm.ErrDuplicatedKey /
+		// gorm.ErrForeignKeyViolated so a service can map a constraint breach to
+		// ErrConflict instead of letting it fall through as a 500. Inert
+		// everywhere that doesn't test for those sentinels.
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("db: connect: %w", err)

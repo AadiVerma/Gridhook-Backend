@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -30,39 +31,83 @@ type CreateServerInput struct {
 }
 
 func (s *MCPServerService) Create(ctx context.Context, orgID int64, in CreateServerInput) (*models.MCPServer, error) {
-	slug := in.Slug
-	if slug == "" {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, fmt.Errorf("%w: name is required", ErrValidation)
+	}
 
-		var err error
-		if slug, err = s.uniqueSlug(ctx, orgID, in.Name); err != nil {
-			return nil, err
-		}
+	serverSlug, err := s.resolveSlug(ctx, orgID, name, strings.TrimSpace(in.Slug))
+	if err != nil {
+		return nil, err
 	}
 
 	srv := &models.MCPServer{
 		OrganizationID: orgID,
-		Name:           in.Name,
-		Slug:           slug,
+		Name:           name,
+		Slug:           serverSlug,
 		Description:    in.Description,
 		Status:         models.ServerStopped,
 	}
 	if err := s.db.WithContext(ctx).Create(srv).Error; err != nil {
+		// The pre-check above loses to a concurrent create with the same explicit
+		// slug; the unique index is what actually decides, so translate its verdict
+		// rather than surfacing a 500.
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return nil, fmt.Errorf("%w: slug %q is already in use", ErrConflict, serverSlug)
+		}
 		return nil, fmt.Errorf("controlplane: create mcp_server: %w", err)
 	}
-	srv.Endpoint = s.endpoint(srv.Slug)
+
+	// Hydrate rather than just stamping Endpoint, so a create response is
+	// shape-identical to a read: callers get ConnectorIDs/ToolGroupIDs as empty
+	// slices instead of a JSON null they'd each have to normalise.
+	if err := s.hydrate(ctx, []*models.MCPServer{srv}); err != nil {
+		return nil, err
+	}
 	return srv, nil
+}
+
+// resolveSlug generates a free slug from name, or validates a caller-supplied one.
+//
+// An explicit slug is never auto-suffixed the way a generated one is: it becomes
+// part of the public endpoint and there is no rename path, so quietly handing back
+// "sales-2" when the caller asked for "sales" would bake in a URL they never chose.
+// A collision is theirs to resolve.
+func (s *MCPServerService) resolveSlug(ctx context.Context, orgID int64, name, requested string) (string, error) {
+	if requested == "" {
+		return s.uniqueSlug(ctx, orgID, name)
+	}
+	if normalized := slugify(requested); normalized != requested {
+		return "", fmt.Errorf("%w: slug %q is not URL-safe; use %q", ErrValidation, requested, normalized)
+	}
+	taken, err := s.slugTaken(ctx, orgID, requested)
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		return "", fmt.Errorf("%w: slug %q is already in use", ErrConflict, requested)
+	}
+	return requested, nil
+}
+
+func (s *MCPServerService) slugTaken(ctx context.Context, orgID int64, slug string) (bool, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&models.MCPServer{}).
+		Where("organization_id = ? AND slug = ?", orgID, slug).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("controlplane: create mcp_server: check slug: %w", err)
+	}
+	return count > 0, nil
 }
 
 func (s *MCPServerService) uniqueSlug(ctx context.Context, orgID int64, name string) (string, error) {
 	base := slugify(name)
 	slug := base
 	for attempt := 2; ; attempt++ {
-		var count int64
-		if err := s.db.WithContext(ctx).Model(&models.MCPServer{}).
-			Where("organization_id = ? AND slug = ?", orgID, slug).Count(&count).Error; err != nil {
-			return "", fmt.Errorf("controlplane: create mcp_server: generate slug: %w", err)
+		taken, err := s.slugTaken(ctx, orgID, slug)
+		if err != nil {
+			return "", err
 		}
-		if count == 0 {
+		if !taken {
 			return slug, nil
 		}
 		slug = fmt.Sprintf("%s-%d", base, attempt)
