@@ -97,7 +97,7 @@ func (s *ToolService) createTool(ctx context.Context, tx *gorm.DB, connectorAPII
 	return t, nil
 }
 
-func (s *ToolService) BulkCreate(ctx context.Context, orgID, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool) ([]*models.MCPTool, error) {
+func (s *ToolService) BulkCreate(ctx context.Context, orgID, connectorAPIID int64, engineType models.EngineType, drafts []parsers.DraftTool, groupID *int64) ([]*models.MCPTool, error) {
 	if err := s.assertAPIInOrg(ctx, orgID, connectorAPIID); err != nil {
 		return nil, err
 	}
@@ -114,6 +114,7 @@ func (s *ToolService) BulkCreate(ctx context.Context, orgID, connectorAPIID int6
 				EndpointMapping: d.EndpointMapping,
 				ResponseMapping: d.ResponseMapping,
 				OutputSchema:    d.OutputSchema,
+				GroupID:         groupID,
 			})
 			if err != nil {
 				return fmt.Errorf("tool %q: %w", d.Name, err)

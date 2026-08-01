@@ -84,6 +84,7 @@ func run() error {
 	users := identity.NewUserService(database.DB)
 	orgs := controlplane.NewOrganizationService(database.DB)
 	connectors := controlplane.NewConnectorService(database.DB)
+	marketplace := controlplane.NewMarketplaceService(database.DB)
 	apis := controlplane.NewAPIService(database.DB, sealer)
 	tools := controlplane.NewToolService(database.DB)
 	groups := controlplane.NewGroupService(database.DB)
@@ -105,6 +106,7 @@ func run() error {
 		Users:         users,
 		Organizations: orgs,
 		Connectors:    connectors,
+		Marketplace:   marketplace,
 		APIs:          apis,
 		Tools:         tools,
 		Groups:        groups,

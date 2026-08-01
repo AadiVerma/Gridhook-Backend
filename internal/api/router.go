@@ -32,6 +32,7 @@ type Deps struct {
 	Users         *identity.UserService
 	Organizations *controlplane.OrganizationService
 	Connectors    *controlplane.ConnectorService
+	Marketplace   *controlplane.MarketplaceService
 	APIs          *controlplane.APIService
 	Tools         *controlplane.ToolService
 	Groups        *controlplane.GroupService
@@ -84,6 +85,7 @@ func NewRouter(d Deps) http.Handler {
 			registerOrganizationRoutes(r, d)
 			registerUserRoutes(r, d)
 			registerConnectorRoutes(r, d)
+			registerMarketplaceRoutes(r, d)
 			registerGroupRoutes(r, d)
 			registerMCPServerRoutes(r, d)
 			registerAuditLogRoutes(r, d)

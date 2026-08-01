@@ -358,7 +358,7 @@ func handleImportConnector(d Deps) http.HandlerFunc {
 			handleServiceError(w, r, d.Logger, err)
 			return
 		}
-		tools, err := d.Tools.BulkCreate(r.Context(), orgID, api.ID, result.EngineType, result.Tools)
+		tools, err := d.Tools.BulkCreate(r.Context(), orgID, api.ID, result.EngineType, result.Tools, nil)
 		if err != nil {
 			handleServiceError(w, r, d.Logger, err)
 			return
